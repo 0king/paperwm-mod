@@ -1487,6 +1487,11 @@ export class Space extends Array {
         }
         this.drifting = true;
         driftSpace = this;
+        // Manual pan releases the focus-mode cycle lock: otherwise the
+        // key-release snap below (ensureViewport) would pull the viewport
+        // back to the cycled left/center/right slot instead of keeping the
+        // drifted position.
+        this.positionMode = null;
         // Stop any in-flight viewport animation so direct panning below
         // doesn't fight with it (previously each tick started a new
         // ensureViewport animation, which pulled the viewport back to the
@@ -1551,14 +1556,40 @@ export class Space extends Array {
                 return false;
             }
             // Free pan clamped to the tiled content, so we never drift
-            // into empty blank viewport. Valid range is
-            // [width - contentWidth, 0]; when content fits the viewport
-            // this collapses to 0 (no drift).
-            const contentWidth = space.cloneContainer.width;
+            // into empty blank viewport. Content occupies
+            // [contentStart, contentEnd] in strip coords; keeping that
+            // interval covering [0, viewWidth] gives x in
+            // [viewWidth - contentEnd, -contentStart]. The previous
+            // [minX, 0] range assumed offsets are never positive, which is
+            // false in span mode (showing primary content needs positive
+            // offsets) and collapsed to [0, 0] whenever content is
+            // narrower than the viewport, freezing drift entirely.
+            // When content is narrower than the viewport the range
+            // inverts - then pan freely and let the key-release snap
+            // settle on a window.
+            let contentStart = Infinity, contentEnd = -Infinity;
+            space.getWindows().forEach(w => {
+                const s = w.clone?.targetX;
+                if (!Number.isFinite(s)) {
+                    return;
+                }
+                const ww = w.clone?.width || w.get_frame_rect().width;
+                if (s < contentStart) {
+                    contentStart = s;
+                }
+                if (s + ww > contentEnd) {
+                    contentEnd = s + ww;
+                }
+            });
             const viewWidth = space.width;
-            const minX = Math.min(0, viewWidth - contentWidth);
             let newX = space.cloneContainer.x - dx;
-            newX = Math.max(minX, Math.min(0, newX));
+            if (Number.isFinite(contentStart) && Number.isFinite(contentEnd)) {
+                const minTarget = viewWidth - contentEnd;
+                const maxTarget = -contentStart;
+                if (minTarget <= maxTarget) {
+                    newX = Math.max(minTarget, Math.min(maxTarget, newX));
+                }
+            }
             space.cloneContainer.x = newX;
             space.targetX = newX;
 

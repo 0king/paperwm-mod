@@ -336,6 +336,10 @@ export function horizontalTouchScroll(_actor, event) {
 }
 
 export function update(space, dx, t) {
+    // Manual pan releases the focus-mode cycle lock, so the gesture-end
+    // snap (done -> ensuredX) keeps the scrolled position instead of
+    // pulling the viewport back to the cycled left/center/right slot.
+    space.positionMode = null;
     dxs.push(dx);
     dts.push(t);
 
