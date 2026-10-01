@@ -5,7 +5,7 @@ XDG_DATA_HOME := ${HOME}/.local/share
 endif
 
 SOURCE      := $$PWD
-EXT_ID      := paperwm@paperwm.github.com
+EXT_ID      := paperwm-mod@paperwm.github.com
 EXT_DIR     := $(XDG_DATA_HOME)/gnome-shell/extensions
 TARGET      := $(EXT_DIR)/$(EXT_ID)
 

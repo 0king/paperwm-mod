@@ -41,6 +41,91 @@ export const CycleWindowSizesDirection = { FORWARD: 0, BACKWARDS: 1 };
 export const SlurpInsertPosition = { BOTTOM: 0, TOP: 1, ABOVE: 2, BELOW: 3 };
 
 /**
+ * Single spanning workspace: one PaperWM Space extends across all monitors.
+ * When `spaces.spanAllMonitors` is true, every monitor shows the same Space,
+ * whose clip covers the bounding box of all monitors.
+ *
+ * Kill-switch: set to `false` to revert to upstream per-monitor Spaces
+ * without reverting the rest of the patch.
+ */
+export const SPAN_ALL_MONITORS = true;
+export function getMonitorsBoundingBox() {
+    let minX = Infinity, minY = Infinity;
+    let maxRight = -Infinity, maxBottom = -Infinity;
+    for (let m of Main.layoutManager.monitors) {
+        if (m.x < minX) minX = m.x;
+        if (m.y < minY) minY = m.y;
+        if (m.x + m.width > maxRight) maxRight = m.x + m.width;
+        if (m.y + m.height > maxBottom) maxBottom = m.y + m.height;
+    }
+    // single monitor fallback / no monitors yet
+    if (!Number.isFinite(minX)) {
+        let primary = Main.layoutManager.primaryMonitor;
+        if (primary) {
+            return { x: primary.x, y: primary.y, width: primary.width, height: primary.height };
+        }
+        return { x: 0, y: 0, width: 0, height: 0 };
+    }
+    return { x: minX, y: minY, width: maxRight - minX, height: maxBottom - minY };
+}
+
+/**
+ * Union of all monitors' workAreas, expressed in span (space) coordinates,
+ * i.e. relative to getMonitorsBoundingBox() origin.
+ */
+export function computeSpannedWorkArea() {
+    const bb = getMonitorsBoundingBox();
+    const vMargin = Settings?.prefs?.vertical_margin ?? 0;
+    const vMarginBottom = Settings?.prefs?.vertical_margin_bottom ?? 0;
+    let minX = Infinity, minY = Infinity;
+    let maxRight = -Infinity, maxBottom = -Infinity;
+    for (let mon of Main.layoutManager.monitors) {
+        const wa = Main.layoutManager.getWorkAreaForMonitor(mon.index);
+        if (!wa) {
+            continue;
+        }
+        if (wa.x < minX) minX = wa.x;
+        if (wa.y < minY) minY = wa.y;
+        if (wa.x + wa.width > maxRight) maxRight = wa.x + wa.width;
+        if (wa.y + wa.height > maxBottom) maxBottom = wa.y + wa.height;
+    }
+    if (!Number.isFinite(minX)) {
+        return { x: 0, y: vMargin, width: bb.width, height: Math.max(0, bb.height - vMargin - vMarginBottom) };
+    }
+    return {
+        x: minX - bb.x,
+        y: minY - bb.y + vMargin,
+        width: maxRight - minX,
+        height: maxBottom - minY - vMargin - vMarginBottom,
+    };
+}
+
+/**
+ * Primary monitor's workArea expressed in span (space) coordinates.
+ * Used to center windows on the primary monitor when spanning
+ * (e.g. focus CENTER mode, centerWindow).
+ */
+export function getPrimaryWorkAreaSpanCoords() {
+    const bb = getMonitorsBoundingBox();
+    const primary = Main.layoutManager.primaryMonitor;
+    if (!primary) {
+        return computeSpannedWorkArea();
+    }
+    const wa = Main.layoutManager.getWorkAreaForMonitor(primary.index);
+    if (!wa) {
+        return computeSpannedWorkArea();
+    }
+    const vMargin = Settings?.prefs?.vertical_margin ?? 0;
+    const vMarginBottom = Settings?.prefs?.vertical_margin_bottom ?? 0;
+    return {
+        x: wa.x - bb.x,
+        y: wa.y - bb.y + vMargin,
+        width: wa.width,
+        height: wa.height - vMargin - vMarginBottom,
+    };
+}
+
+/**
    Scrolled and tiled per monitor workspace.
 
    The tiling is composed of an array of columns. A column being an array of
@@ -163,7 +248,7 @@ export function enable(extension) {
                 let options = s.isFullyVisible(s.selectedWindow) ? { moveto: false } : { force: true };
                 ensureViewport(s.selectedWindow, s, options);
             }
-            s.monitor.clickOverlay.show();
+            s.monitor?.clickOverlay?.show();
         });
         Topbar.fixTopBar();
 
@@ -513,9 +598,19 @@ export class Space extends Array {
 
     /**
      * Returns current workArea parameters for this space.
+     * In span mode this is the union of all monitors' workAreas
+     * (expressed in span/space coordinates). Use
+     * getPrimaryWorkAreaSpanCoords() when you need the primary
+     * monitor's area (e.g. centering in focus CENTER mode).
      * @returns object with x, y, width, and height values for this WorkArea.
      */
     workArea() {
+        if (spaces?.spanAllMonitors) {
+            return computeSpannedWorkArea();
+        }
+        if (!this.monitor) {
+            return computeSpannedWorkArea();
+        }
         let workArea = Main.layoutManager.getWorkAreaForMonitor(this.monitor.index);
         return {
             x: workArea.x - this.monitor.x,
@@ -546,7 +641,10 @@ export class Space extends Array {
 
         const gap = Settings.prefs.window_gap;
         const f = grabWindow.get_frame_rect();
-        let yGrabRel = f.y - this.monitor.y;
+        const grabOriginY = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().y
+            : this.monitor.y;
+        let yGrabRel = f.y - grabOriginY;
         targetWidth = f.width;
 
         const H1 = (yGrabRel - y0) - gap - (k - 1) * gap;
@@ -603,7 +701,13 @@ export class Space extends Array {
                     mw.move_resize_frame(true, f.x, f.y, targetWidth, targetHeight);
                 }
             } else {
-                mw.move_frame(true, space.monitor.x, space.monitor.y);
+                const originX = spaces?.spanAllMonitors
+                    ? getMonitorsBoundingBox().x
+                    : space.monitor.x;
+                const originY = spaces?.spanAllMonitors
+                    ? getMonitorsBoundingBox().y
+                    : space.monitor.y;
+                mw.move_frame(true, originX, originY);
                 targetWidth = f.width;
                 targetHeight = f.height;
             }
@@ -777,7 +881,20 @@ export class Space extends Array {
         this.cloneContainer.width = width;
 
         if (auto && animate) {
-            if (width < workArea.width) {
+            if (spaces?.spanAllMonitors) {
+                // In span mode the viewport covers all monitors. When the
+                // whole strip fits, center it on the primary monitor (not on
+                // the bezel) so it agrees with centerWindow()/ensuredX()
+                // CENTER handling instead of fighting it (flicker/dance).
+                const primaryWA = getPrimaryWorkAreaSpanCoords();
+                if (width < primaryWA.width) {
+                    this.targetX = primaryWA.x + Math.round((primaryWA.width - width) / 2);
+                } else if (this.targetX + width < min + workArea.width) {
+                    this.targetX = min + workArea.width - width;
+                } else if (this.targetX > workArea.min) {
+                    this.targetX = workArea.x;
+                }
+            } else if (width < workArea.width) {
                 this.targetX = min + Math.round((workArea.width - width) / 2);
             } else if (this.targetX + width < min + workArea.width) {
                 this.targetX = min + workArea.width - width;
@@ -860,17 +977,35 @@ export class Space extends Array {
     isPlaceable(metaWindow) {
         let clone = metaWindow.clone;
         let x = this.visibleX(metaWindow);
-        let workArea = Main.layoutManager.getWorkAreaForMonitor(this.monitor.index);
-        let min = workArea.x - this.monitor.x;
+        let min, workAreaWidth;
+        if (spaces?.spanAllMonitors) {
+            const wa = computeSpannedWorkArea();
+            min = wa.x;
+            workAreaWidth = wa.width;
+        } else {
+            let workArea = Main.layoutManager.getWorkAreaForMonitor(this.monitor.index);
+            min = workArea.x - this.monitor.x;
+            workAreaWidth = workArea.width;
+        }
 
         if (x + clone.width < min + stack_margin ||
-            x > min + workArea.width - stack_margin) {
+            x > min + workAreaWidth - stack_margin) {
             return false;
         } else {
-            // Fullscreen windows are only placeable on the monitor origin
-            if ((isMaximized(metaWindow) && x !== min) ||
-                (metaWindow.fullscreen && x !== 0)) {
-                return false;
+            // Fullscreen windows are only placeable on a monitor origin.
+            // In span mode any monitor origin is valid, otherwise the
+            // space's monitor origin.
+            if (isMaximized(metaWindow) || metaWindow.fullscreen) {
+                if (spaces?.spanAllMonitors) {
+                    const bb = getMonitorsBoundingBox();
+                    return Main.layoutManager.monitors.some(
+                        m => Math.abs(x - (m.x - bb.x)) < sizeSlack
+                    );
+                }
+                if ((isMaximized(metaWindow) && x !== min) ||
+                    (metaWindow.fullscreen && x !== 0)) {
+                    return false;
+                }
             }
             return true;
         }
@@ -932,9 +1067,18 @@ export class Space extends Array {
             let f = w.get_frame_rect();
             let clone = w.clone;
             let x = this.visibleX(w);
-            let y = this.monitor.y + clone.targetY;
+            let ox, oy;
+            if (spaces?.spanAllMonitors) {
+                const bb = getMonitorsBoundingBox();
+                ox = bb.x;
+                oy = bb.y;
+            } else {
+                ox = this.monitor.x;
+                oy = this.monitor.y;
+            }
+            let y = oy + clone.targetY;
             x = Math.min(this.width - stack_margin, Math.max(stack_margin - f.width, x));
-            x += this.monitor.x;
+            x += ox;
 
             // check if mismatch tracking needed, otherwise leave
             if (f.x === x && f.y === y) {
@@ -969,10 +1113,13 @@ export class Space extends Array {
 
         Utils.actor_reparent(metaWindow.clone, this.cloneContainer);
 
-        // Make sure the cloneContainer is in a clean state (centered) before layout
+        // Make sure the cloneContainer is in a clean state (centered) before layout.
+        // In span mode center on primary so it agrees with layout()/centerWindow().
         if (this.length === 1) {
-            let workArea = this.workArea();
-            this.targetX = workArea.x + Math.round((workArea.width - this.cloneContainer.width) / 2);
+            const area = spaces?.spanAllMonitors
+                ? getPrimaryWorkAreaSpanCoords()
+                : this.workArea();
+            this.targetX = area.x + Math.round((area.width - this.cloneContainer.width) / 2);
         }
         this.emit('window-added', metaWindow, index, row);
         return true;
@@ -1188,6 +1335,10 @@ export class Space extends Array {
     switchGlobalUp() { this.switchGlobal(Meta.MotionDirection.UP); }
     switchGlobalDown() { this.switchGlobal(Meta.MotionDirection.DOWN); }
     switchGlobal(direction) {
+        if (spaces?.spanAllMonitors) {
+            // Single spanning workspace: no cross-monitor Space switching.
+            return this.switch(direction, false);
+        }
         let space = this;
         let index = space.selectedIndex();
         if (index === -1) {
@@ -1301,7 +1452,10 @@ export class Space extends Array {
      * Return the y position of the visible element of this window.
      */
     visibleY(metaWindow) {
-        return metaWindow.clone.targetY + this.monitor.y;
+        const originY = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().y
+            : this.monitor.y;
+        return metaWindow.clone.targetY + originY;
     }
 
     positionOf(metaWindow) {
@@ -1379,6 +1533,9 @@ export class Space extends Array {
 
         this.visible = [];
         const monitor = this.monitor;
+        const monitorOriginX = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().x
+            : monitor.x;
         this.getWindows().forEach(w => {
             let actor = w.get_compositor_private();
             if (!actor)
@@ -1402,7 +1559,7 @@ export class Space extends Array {
             let y = this.visibleY(w);
             x = Math.max(stack_margin - f.width, x);
             x = Math.min(this.width - stack_margin, x);
-            x += monitor.x;
+            x += monitorOriginX;
             // let b = w.get_frame_rect();
             if (f.x !== x || f.y !== y) {
                 w.move_frame(true, x, y);
@@ -1421,7 +1578,9 @@ export class Space extends Array {
         this.fixOverlays();
 
         // See startAnimate
-        Main.layoutManager.untrackChrome(this.background);
+        if (this.background) {
+            Main.layoutManager.untrackChrome(this.background);
+        }
 
         this._isAnimating = false;
 
@@ -1452,11 +1611,22 @@ export class Space extends Array {
         }
 
         // The actor's width/height is not correct right after resize
+        // In span mode the space covers the monitors bounding box.
+        const originX = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().x
+            : this.monitor?.x ?? 0;
+        const originY = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().y
+            : this.monitor?.y ?? 0;
+        const cw = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().width
+            : this.monitor?.width ?? 0;
+        const ch = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().height
+            : this.monitor?.height ?? 0;
         const b = metaWindow.get_buffer_rect();
-        const x = this.monitor.x - b.x;
-        const y = this.monitor.y - b.y;
-        const cw = this.monitor.width;
-        const ch = this.monitor.height;
+        const x = originX - b.x;
+        const y = originY - b.y;
         actor.set_clip(x, y, cw, ch);
     }
 
@@ -1465,7 +1635,9 @@ export class Space extends Array {
             // Tracking the background fixes issue #80
             // It also let us activate window clones clicked during animation
             // Untracked in moveDone
-            Main.layoutManager.trackChrome(this.background);
+            if (this.background) {
+                Main.layoutManager.trackChrome(this.background);
+            }
         }
 
         this.visible.forEach(w => {
@@ -1482,8 +1654,14 @@ export class Space extends Array {
             let f = w.get_frame_rect();
             if (!animateWindow(w))
                 return;
-            w.clone.x = f.x - this.monitor.x;
-            w.clone.y = f.y - this.monitor.y;
+            const originX = spaces?.spanAllMonitors
+                ? getMonitorsBoundingBox().x
+                : this.monitor?.x ?? 0;
+            const originY = spaces?.spanAllMonitors
+                ? getMonitorsBoundingBox().y
+                : this.monitor?.y ?? 0;
+            w.clone.x = f.x - originX;
+            w.clone.y = f.y - originY;
         });
 
         this._isAnimating = true;
@@ -1493,7 +1671,10 @@ export class Space extends Array {
         metaWindow = metaWindow || this.selectedWindow;
         let index = this.indexOf(metaWindow);
         let target = this.targetX;
-        this.monitor.clickOverlay.reset();
+        this.monitor?.clickOverlay?.reset();
+        if (!this.monitor?.clickOverlay) {
+            return;
+        }
         for (let overlay = this.monitor.clickOverlay.right,
             n = index + 1; n < this.length; n++) {
             let metaWindow = this[n][0];
@@ -1660,7 +1841,7 @@ border-radius: ${borderWidth}px;
     }
 
     updateBackground() {
-        if (!this.monitor) {
+        if (!this.monitor || !this.background || !this.settings) {
             return;
         }
 
@@ -1906,14 +2087,19 @@ border-radius: ${borderWidth}px;
     }
 
     createBackground() {
-        const monitor = this.monitor;
+        const monitor = this.monitor ?? Main.layoutManager.primaryMonitor;
         if (!monitor) {
             return;
+        }
+        // keep this.monitor in sync if we fell back to primary
+        if (!this.monitor) {
+            this.monitor = monitor;
         }
 
         if (this.background) {
             this.signals.disconnect(this.background);
             this.background.destroy();
+            this.background = null;
         }
 
 
@@ -2000,16 +2186,41 @@ border-radius: ${borderWidth}px;
             this.createBackground();
             this.updateColor();
             this.updateBackground();
-
-            // update width of windowPositonBarBackdrop (to match monitor)
+        }
+        // Background may still be missing (e.g. first call with
+        // commit:false, or no monitor at construction time) - ensure it
+        // exists before sizing below.
+        if (!this.background && this.monitor) {
+            this.createBackground();
+            this.updateColor();
+            this.updateBackground();
+        }
+        // update width of windowPositionBarBackdrop (to match monitor/span)
+        if (spaces?.spanAllMonitors) {
+            this.windowPositionBarBackdrop.width = getMonitorsBoundingBox().width;
+        } else {
             this.windowPositionBarBackdrop.width = monitor.width;
         }
 
         let background = this.background;
         let clip = this.clip;
 
-        this.width = monitor.width;
-        this.height = monitor.height;
+        let originX, originY, w, h;
+        if (spaces?.spanAllMonitors) {
+            const bb = getMonitorsBoundingBox();
+            originX = bb.x;
+            originY = bb.y;
+            w = bb.width;
+            h = bb.height;
+        } else {
+            originX = monitor.x;
+            originY = monitor.y;
+            w = monitor.width;
+            h = monitor.height;
+        }
+
+        this.width = w;
+        this.height = h;
 
         let time = animate ? Settings.prefs.animation_time : 0;
 
@@ -2021,23 +2232,21 @@ border-radius: ${borderWidth}px;
         Easer.addEase(clip,
             { scale_x: 1, scale_y: 1, time });
 
-        clip.set_position(monitor.x, monitor.y);
-        clip.set_size(monitor.width, monitor.height);
-        clip.set_clip(0, 0,
-            monitor.width,
-            monitor.height);
+        clip.set_position(originX, originY);
+        clip.set_size(w, h);
+        clip.set_clip(0, 0, w, h);
 
         let scale = St.ThemeContext.get_for_stage(global.stage).scale_factor;
         this.border.set_position(-borderWidth * scale, -borderWidth * scale);
-        this.border.set_size(monitor.width + scale * borderWidth * 2,
-            monitor.height + scale * borderWidth * 2);
+        this.border.set_size(w + scale * borderWidth * 2,
+            h + scale * borderWidth * 2);
 
-        background.set_size(this.width, this.height);
+        if (background) background.set_size(w, h);
 
-        this.cloneClip.set_size(monitor.width, monitor.height);
-        this.cloneClip.set_clip(0, 0, this.width, this.height);
+        this.cloneClip.set_size(w, h);
+        this.cloneClip.set_clip(0, 0, w, h);
         // transforms break if there's no height
-        this.cloneContainer.height = this.monitor.height;
+        this.cloneContainer.height = h;
 
         this.layout(true, { centerIfOne: false });
         this.emit('monitor-changed');
@@ -2147,7 +2356,7 @@ border-radius: ${borderWidth}px;
         });
         this.signals.destroy();
         this.signals = null;
-        this.background.destroy();
+        this.background?.destroy();
         this.background = null;
         this.cloneContainer.destroy();
         this.cloneContainer = null;
@@ -2184,6 +2393,10 @@ export const Spaces = class Spaces extends Map {
         this.spaceContainer = spaceContainer;
         this.space_defaultAnimation = true;
         this.space_paperwmAnimation = false;
+
+        // Single spanning workspace: one Space extends across all monitors
+        // instead of one Space per monitor. See SPAN_ALL_MONITORS kill-switch.
+        this.spanAllMonitors = SPAN_ALL_MONITORS;
 
         backgroundGroup.add_child(this.spaceContainer);
 
@@ -2309,6 +2522,53 @@ export const Spaces = class Spaces extends Map {
             this.clickOverlays.push(overlay);
         }
 
+        if (this.spanAllMonitors) {
+            // Single spanning workspace: every monitor shows the same Space,
+            // whose clip spans the bounding box of all monitors.
+            const toSpace = this.activeSpace ?? mru[0] ?? [...this.values()][0];
+            if (!toSpace) {
+                return;
+            }
+            for (let monitor of Main.layoutManager.monitors) {
+                this.monitors.set(monitor, toSpace);
+            }
+            saveState.update(true);
+            // All Spaces live on primary in span mode (keeps topbar/workArea
+            // logic consistent); only the active one is shown spanning.
+            this.forEach(space => {
+                space.monitor = primary;
+            });
+            // Resize clip to span all monitors (anchored on primary).
+            toSpace.setMonitor(primary);
+            toSpace.show();
+            Utils.actor_raise(toSpace.clip);
+            // Hide all other spaces (they remain switchable via workspace switch).
+            this.forEach(space => {
+                if (space !== toSpace) {
+                    space.hide();
+                }
+            });
+            this.selectedSpace = toSpace;
+            this.spaceContainer.show();
+            Topbar.refreshWorkspaceIndicator();
+            this.forEach(s => s.setSpaceTopbarElementsVisible());
+            Stackoverlay.multimonitorSupport();
+            // Ensure layout is correct after spanning.
+            Utils.later_add(Meta.LaterType.IDLE, () => {
+                if (saveState.hasPrevTargetX()) {
+                    for (let [uuid, targetX] of saveState.prevTargetX) {
+                        let space = this.spaceOfUuid(uuid);
+                        if (space && Number.isFinite(targetX)) {
+                            space.viewportMoveToX(targetX, false);
+                        }
+                    }
+                }
+                saveState.update();
+                this.forEach(space => space.layout(false));
+            });
+            return;
+        }
+
         let finish = () => {
             /**
              * Gnome may select a workspace that just had it monitor removed (gone).
@@ -2430,6 +2690,15 @@ export const Spaces = class Spaces extends Map {
     }
 
     _updateMonitor() {
+        if (this.spanAllMonitors) {
+            // Single spanning workspace: nothing to re-assign, but ensure the
+            // selected Space still spans (e.g. after resolution change).
+            const primary = Main.layoutManager.primaryMonitor;
+            if (primary && this.selectedSpace) {
+                this.selectedSpace.setMonitor(primary);
+            }
+            return;
+        }
         let monitorSpaces = this._getOrderedSpaces(this.selectedSpace.monitor);
         let currentMonitor = this.selectedSpace.monitor;
         monitorSpaces.forEach((space, _i) => {
@@ -2533,6 +2802,19 @@ export const Spaces = class Spaces extends Map {
     }
 
     switchMonitor(direction, move, warp = true) {
+        if (this.spanAllMonitors) {
+            // Single spanning workspace: switching monitor only moves the
+            // pointer, the Space stays the same.
+            let monitor = focusMonitor() ?? Main.layoutManager.primaryMonitor;
+            let i = display.get_monitor_neighbor_index(monitor.index, direction);
+            if (i === -1)
+                return;
+            let newMonitor = Main.layoutManager.monitors[i];
+            if (warp) {
+                Utils.warpPointerToMonitor(newMonitor);
+            }
+            return;
+        }
         let focus = display.focus_window;
         let monitor = focusMonitor();
         let currentSpace = this.monitors.get(monitor);
@@ -2574,6 +2856,9 @@ export const Spaces = class Spaces extends Map {
     }
 
     moveToMonitor(direction, backDirection) {
+        if (this.spanAllMonitors) {
+            return;
+        }
         const monitor = focusMonitor();
         const i = display.get_monitor_neighbor_index(monitor.index, direction);
         if (i === -1)
@@ -2623,6 +2908,9 @@ export const Spaces = class Spaces extends Map {
     }
 
     swapMonitor(direction, backDirection, options = {}) {
+        if (this.spanAllMonitors) {
+            return;
+        }
         const checkIfLast = options.checkIfLast ?? true;
         const warpIfLast = options.warpIfLast ?? true;
 
@@ -2741,8 +3029,17 @@ export const Spaces = class Spaces extends Map {
         this.stack = this.stack.filter(s => s !== toSpace);
         this.stack = [toSpace, ...this.stack];
 
-        let monitor = toSpace.monitor;
-        this.setMonitors(monitor, toSpace, true);
+        if (this.spanAllMonitors) {
+            // Single spanning workspace: all monitors show the same Space.
+            for (let m of Main.layoutManager.monitors) {
+                this.setMonitors(m, toSpace, true);
+            }
+            // Ensure the new Space spans (in case monitors changed).
+            toSpace.setMonitor(Main.layoutManager.primaryMonitor ?? toSpace.monitor);
+        } else {
+            let monitor = toSpace.monitor;
+            this.setMonitors(monitor, toSpace, true);
+        }
 
         this.forEach(s => s.setSpaceTopbarElementsVisible());
         let doAnimate = animate || this.space_paperwmAnimation;
@@ -3741,7 +4038,9 @@ export function resizeHandler(metaWindow) {
 
     space.showSelection();
     x = metaWindow?._fullscreen_frame?.x ?? f.x;
-    x -= space.monitor.x;
+    x -= spaces?.spanAllMonitors
+        ? getMonitorsBoundingBox().x
+        : space.monitor.x;
 
     // for non-maximised windows, enforce horizontal margin in restore position
     if (!isMaximized(metaWindow) && !isMaximizedHorizontal(metaWindow)) {
@@ -4128,8 +4427,10 @@ Opening "${metaWindow?.title}" on current space.`);
     if (!add_filter(metaWindow)) {
         connectSizeChanged();
         space.addFloating(metaWindow);
-        // Make sure the window is on the correct monitor
-        metaWindow.move_to_monitor(space.monitor.index);
+        // Make sure the window is on the correct monitor (only needed in multi-space mode)
+        if (!spaces.spanAllMonitors) {
+            metaWindow.move_to_monitor(space.monitor.index);
+        }
         showWindow(metaWindow);
         // Make sure the window isn't hidden behind the space (eg. dialogs)
         !existing && metaWindow.make_above();
@@ -4301,22 +4602,41 @@ export function ensuredX(meta_window, space) {
     let x;
     if (neighbour || space.isVisible(meta_window) || meta_window.lastFrame === undefined)
         x = Math.round(clone.targetX) + space.targetX;
-    else
-        x = meta_window.lastFrame.x - monitor.x;
+    else {
+        // lastFrame is in global (stage) coords: convert to space coords.
+        // In span mode the space origin is the monitors bounding box.
+        const originX = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().x
+            : monitor.x;
+        x = meta_window.lastFrame.x - originX;
+    }
     let workArea = space.workArea();
     let min = workArea.x;
     let max = min + workArea.width;
 
     if (space.focusMode === FocusModes.CENTER) {
-        // window switching should centre focus
-        x = workArea.x + Math.round(workArea.width / 2 - frame.width / 2);
+        // window switching should centre focus.
+        // In span mode centre on the primary monitor (not on the bezel
+        // between monitors).
+        if (spaces?.spanAllMonitors) {
+            const primaryWA = getPrimaryWorkAreaSpanCoords();
+            x = primaryWA.x + Math.round(primaryWA.width / 2 - frame.width / 2);
+        } else {
+            x = workArea.x + Math.round(workArea.width / 2 - frame.width / 2);
+        }
     } else if (meta_window.fullscreen) {
-        x = 0;
+        x = workArea.x;
     } else if (space.focusMode === FocusModes.EDGE) {
         // Align to the closest edge, with special cases for
         // only (center), first (left), and last (right) windows
-        if (index === 0 && space.length === 1)
-            x = min + Math.round((workArea.width - frame.width) / 2);
+        if (index === 0 && space.length === 1) {
+            if (spaces?.spanAllMonitors) {
+                const primaryWA = getPrimaryWorkAreaSpanCoords();
+                x = primaryWA.x + Math.round((primaryWA.width - frame.width) / 2);
+            } else {
+                x = min + Math.round((workArea.width - frame.width) / 2);
+            }
+        }
         else if (index === 0 || (Math.abs(x - min) < Math.abs(x + frame.width - max) &&
             index !== space.length - 1))
             x = min + Settings.prefs.horizontal_margin;
@@ -4611,8 +4931,10 @@ export function focus_handler(metaWindow) {
 
     let space = spaces.spaceOfWindow(metaWindow);
 
-    // if window is on another monitor then warp pointer there
-    if (!Main.overview.visible &&
+    // if window is on another monitor then warp pointer there.
+    // In span mode the Space covers all monitors, so no warp is needed.
+    if (!spaces?.spanAllMonitors &&
+        !Main.overview.visible &&
         Utils.monitorAtCurrentPoint() !== space.monitor) {
         Utils.warpPointerToMonitor(space.monitor);
     }
@@ -4666,7 +4988,7 @@ export function focus_handler(metaWindow) {
         space.enableWindowPositionBar(true);
         space.showSelection();
     }
-    space.monitor.clickOverlay.show();
+    space.monitor?.clickOverlay?.show();
 
     /**
        Find the closest neighbours. Remove any dead windows in the process to
@@ -4807,7 +5129,11 @@ export function toggleMaximizeHorizontally(metaWindow) {
     maxWidthPrc = Math.min(1.0, maxWidthPrc);
 
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
+    // In span mode limit horizontal maximize to the primary monitor so
+    // windows don't straddle the bezel between monitors.
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
     let frame = metaWindow.get_frame_rect();
     let reqWidth = maxWidthPrc * workArea.width - Settings.prefs.horizontal_margin * 2;
 
@@ -4823,7 +5149,10 @@ export function toggleMaximizeHorizontally(metaWindow) {
 
         metaWindow.unmaximizedRect = null;
     } else {
-        let x = workArea.x + space.monitor.x + Settings.prefs.horizontal_margin;
+        const originX = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().x
+            : space.monitor.x;
+        let x = workArea.x + originX + Settings.prefs.horizontal_margin;
         metaWindow.unmaximizedRect = frame;
         metaWindow.move_resize_frame(true, x, frame.y, reqWidth, frame.height);
     }
@@ -4833,7 +5162,9 @@ export function resizeHInc(metaWindow) {
     metaWindow = metaWindow || display.focus_window;
     let frame = metaWindow.get_frame_rect();
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
 
     let maxHeight = workArea.height - Settings.prefs.horizontal_margin * 2 - Settings.prefs.window_gap;
     let step = Math.floor(maxHeight * 0.1);
@@ -4853,7 +5184,9 @@ export function resizeHDec(metaWindow) {
     metaWindow = metaWindow || display.focus_window;
     let frame = metaWindow.get_frame_rect();
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
 
     let maxHeight = workArea.height - Settings.prefs.horizontal_margin * 2 - Settings.prefs.window_gap;
     let step = Math.floor(maxHeight * 0.1);
@@ -4874,7 +5207,9 @@ export function resizeWInc(metaWindow) {
     metaWindow = metaWindow || display.focus_window;
     let frame = metaWindow.get_frame_rect();
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
 
     let maxWidth = workArea.width - Settings.prefs.horizontal_margin * 2 - Settings.prefs.window_gap;
     let step = Math.floor(maxWidth * 0.1);
@@ -4894,7 +5229,9 @@ export function resizeWDec(metaWindow) {
     metaWindow = metaWindow || display.focus_window;
     let frame = metaWindow.get_frame_rect();
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
 
     let maxWidth = workArea.width - Settings.prefs.horizontal_margin * 2 - Settings.prefs.window_gap;
     let step = Math.floor(maxWidth * 0.1);
@@ -4914,7 +5251,9 @@ export function resizeWDec(metaWindow) {
 export function getCycleWindowWidths(metaWindow) {
     let steps = Settings.prefs.cycle_width_steps;
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
 
     if (steps[0] <= 1) {
         // Steps are specifed as ratios -> convert to pixels
@@ -4937,8 +5276,12 @@ export function cycleWindowWidthBackwards(metawindow) {
 export function cycleWindowWidthDirection(metaWindow, direction) {
     let frame = metaWindow.get_frame_rect();
     let space = spaces.spaceOfWindow(metaWindow);
-    let workArea = space.workArea();
-    workArea.x += space.monitor.x;
+    let workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
+    workArea.x += spaces?.spanAllMonitors
+        ? getMonitorsBoundingBox().x
+        : space.monitor.x;
 
     let findFn = direction === CycleWindowSizesDirection.FORWARD ? Lib.findNext : Lib.findPrev;
 
@@ -5051,18 +5394,28 @@ function activateWindowAfterRendered(actor, mw) {
 
 /**
  * Centers the currently selected window.
+ * In span mode the window is centered on the primary monitor
+ * (not across the bezel between monitors).
  */
 export function centerWindow(metaWindow, horizontal = true, vertical = false) {
     const frame = metaWindow.get_frame_rect();
     const space = spaces.spaceOfWindow(metaWindow);
-    const monitor = space.monitor;
-    const workArea = space.workArea();
+    const workArea = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
 
     const targetX = horizontal ? workArea.x + Math.round((workArea.width - frame.width) / 2) : frame.x;
     let targetY = vertical ? workArea.y + Math.round((workArea.height - frame.height) / 2) : frame.y;
     targetY = Math.max(targetY, workArea.y);
     if (space.indexOf(metaWindow) === -1) {
-        Scratch.easeScratch(metaWindow, targetX + monitor.x, targetY + monitor.y);
+        // scratch (floating) windows live in global stage coords
+        const originX = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().x
+            : space.monitor.x;
+        const originY = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().y
+            : space.monitor.y;
+        Scratch.easeScratch(metaWindow, targetX + originX, targetY + originY);
     } else {
         move_to(space, metaWindow, {
             x: targetX,
@@ -5096,6 +5449,12 @@ export function setFocusMode(mode, space) {
     }
 
     const workArea = space.workArea();
+    // In span mode compare against the primary monitor's midpoint so the
+    // saved unfocus side (left/right) is relative to primary, while the
+    // window itself is centered on primary (see centerWindow).
+    const workAreaForMidpoint = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : workArea;
     const selectedWin = space.selectedWindow;
     // if centre also center selectedWindow
     switch (mode) {
@@ -5104,7 +5463,7 @@ export function setFocusMode(mode, space) {
             // check it closer to min or max of workArea
             const frame = selectedWin.get_frame_rect();
             const winMidpoint = space.visibleX(selectedWin) + frame.width / 2;
-            const workAreaMidpoint = workArea.width / 2;
+            const workAreaMidpoint = workAreaForMidpoint.x + workAreaForMidpoint.width / 2;
             if (winMidpoint <= workAreaMidpoint) {
                 space.unfocusXPosition = 0;
             } else {
@@ -5434,9 +5793,12 @@ export function takeWindow(metaWindow, space, options = {}) {
             window.clone.set_position(point.x, point.y);
         }
 
-        let x = Math.round(space.monitor.x + space.monitor.width -
-            (0.08 * space.monitor.width * (1 + navigator._moving.length)));
-        let y = Math.round(space.monitor.y + space.monitor.height * 2 / 3) +
+        const takeBox = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox()
+            : space.monitor;
+        let x = Math.round(takeBox.x + takeBox.width -
+            (0.08 * takeBox.width * (1 + navigator._moving.length)));
+        let y = Math.round(takeBox.y + takeBox.height * 2 / 3) +
             16 * navigator._moving.length;
         animateWindow(window);
         Easer.addEase(window.clone,

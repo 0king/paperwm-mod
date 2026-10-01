@@ -1,6 +1,6 @@
 {
-  "uuid": "paperwm@paperwm.github.com",
-  "name": "PaperWM",
+  "uuid": "paperwm-mod@paperwm.github.com",
+  "name": "PaperWM (Mod)",
   "description": "Tiling window manager with a twist",
   "url": "https://github.com/paperwm/PaperWM",
   "settings-schema": "org.gnome.shell.extensions.paperwm",

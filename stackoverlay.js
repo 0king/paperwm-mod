@@ -57,8 +57,14 @@ export function disable() {
 /**
  * Checks for multiple monitors and if so, then enables multimonitor
  * support in PaperWM.
+ * In span mode a single Space covers all monitors, so per-monitor
+ * activation is disabled.
  */
 export function multimonitorSupport() {
+    if (Tiling.spaces.spanAllMonitors) {
+        disableMultimonitorSupport();
+        return;
+    }
     // if only one monitor, return
     if (Tiling.spaces.monitors?.size > 1) {
         enableMultimonitorSupport();

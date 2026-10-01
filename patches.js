@@ -176,10 +176,12 @@ export function setupOverrides() {
 
             // if switching to a paperwm space that is already shown on a monitor
             // from / to are workspace indices
-            const toSpace = Tiling.spaces.spaceOfIndex(_to);
+            const toSpace = Tiling.spaces?.spaceOfIndex(_to);
 
-            const spaces = Array.from(Tiling.spaces.monitors.values());
-            const toOnMonitor = spaces.some(space => space === toSpace);
+            const shown = Tiling.spaces?.monitors
+                ? Array.from(Tiling.spaces.monitors.values())
+                : [];
+            const toOnMonitor = toSpace && shown.some(space => space === toSpace);
             if (toOnMonitor) {
                 onComplete();
                 reset();
@@ -196,7 +198,11 @@ export function setupOverrides() {
         function (workspaceIndices) {
             const saved = getSavedPrototype(WorkspaceAnimation.WorkspaceAnimationController, '_prepareWorkspaceSwitch');
             // hide selection during workspace switch
-            Tiling.spaces.forEach(s => s.hideSelection());
+            try {
+                Tiling.spaces?.forEach(s => s.hideSelection());
+            } catch (e) {
+                console.warn('#PaperWM _prepareWorkspaceSwitch:', e?.message ?? e);
+            }
             saved.call(this, workspaceIndices);
         });
 
@@ -205,7 +211,11 @@ export function setupOverrides() {
             const saved = getSavedPrototype(WorkspaceAnimation.WorkspaceAnimationController,
                 '_finishWorkspaceSwitch');
             // ensure selection is shown after workspaces swtching
-            Tiling.spaces.forEach(s => s.showSelection());
+            try {
+                Tiling.spaces?.forEach(s => s.showSelection());
+            } catch (e) {
+                console.warn('#PaperWM _finishWorkspaceSwitch:', e?.message ?? e);
+            }
             saved.call(this, switchData);
         });
 
@@ -306,10 +316,27 @@ export function setupOverrides() {
             return true;
         }
 
-        const space = Tiling.spaces.spaceOf(this.metaWorkspace);
-        const onSpace = space.indexOf(window) >= 0;
-        const onMonitor = this._monitor === space.monitor;
-        return onSpace && onMonitor;
+        // Never break overview rendering: fall back to upstream on any
+        // unexpected state (e.g. workspace with no Space yet).
+        try {
+            const space = Tiling.spaces?.spaceOf(this.metaWorkspace);
+            if (!space) {
+                const saved = getSavedPrototype(Workspace.Workspace, '_isMyWindow');
+                return saved?.call(this, window) ?? !window.skip_taskbar;
+            }
+            const onSpace = space.indexOf(window) >= 0;
+            // In span mode a Space covers all monitors, so every tiled window
+            // belongs to the overview regardless of monitor.
+            if (Tiling?.spaces?.spanAllMonitors) {
+                return onSpace;
+            }
+            const onMonitor = this._monitor === space.monitor;
+            return onSpace && onMonitor;
+        } catch (e) {
+            console.warn('#PaperWM _isMyWindow fallback:', e?.message ?? e);
+            const saved = getSavedPrototype(Workspace.Workspace, '_isMyWindow');
+            return saved?.call(this, window) ?? !window.skip_taskbar;
+        }
     });
     registerOverridePrototype(WorkspaceThumbnail.WorkspaceThumbnail, '_isMyWindow', function(actor) {
         const window = actor.meta_window;
@@ -317,10 +344,23 @@ export function setupOverrides() {
             return true;
         }
 
-        const space = Tiling.spaces.spaceOf(this.metaWorkspace);
-        const onSpace = space.indexOf(window) >= 0;
-        const onMonitor = this.monitorIndex === space.monitor.index;
-        return onSpace && onMonitor;
+        try {
+            const space = Tiling.spaces?.spaceOf(this.metaWorkspace);
+            if (!space) {
+                const saved = getSavedPrototype(WorkspaceThumbnail.WorkspaceThumbnail, '_isMyWindow');
+                return saved?.call(this, actor) ?? true;
+            }
+            const onSpace = space.indexOf(window) >= 0;
+            if (Tiling?.spaces?.spanAllMonitors) {
+                return onSpace;
+            }
+            const onMonitor = this.monitorIndex === space.monitor?.index;
+            return onSpace && onMonitor;
+        } catch (e) {
+            console.warn('#PaperWM thumbnail _isMyWindow fallback:', e?.message ?? e);
+            const saved = getSavedPrototype(WorkspaceThumbnail.WorkspaceThumbnail, '_isMyWindow');
+            return saved?.call(this, actor) ?? true;
+        }
     });
 
     /**
@@ -377,7 +417,9 @@ export function setupOverrides() {
 
         this._icon.destroy_all_children();
 
-        this.monitor = Tiling.spaces.selectedSpace.monitor;
+        this.monitor = Tiling.spaces?.selectedSpace?.monitor
+            ?? Main.layoutManager.primaryMonitor
+            ?? Main.layoutManager.monitors[0];
         let _createWindowClone = (window, size) => {
             let [width, height] = window.get_size();
             let scale = Math.min(1.0, size / width, size / height);
@@ -398,7 +440,7 @@ export function setupOverrides() {
         const scale = Settings.prefs.window_switcher_preview_scale;
         // scale size based on PaperWM's minimap-scale
         if (scale > 0) {
-            size = Math.round(this.monitor.height * scale);
+            size = Math.round((this.monitor?.height ?? 800) * scale);
         } else {
             size = WINDOW_PREVIEW_SIZE;
         }
@@ -584,9 +626,17 @@ export function _checkWorkspaces() {
     let workspaceManager = global.workspace_manager;
     let i;
     let emptyWorkspaces = [];
-    let minimum = Meta.prefs_get_dynamic_workspaces()
-        ? Main.layoutManager.monitors.length + 1
-        : Main.layoutManager.monitors.length;
+    const nMon = Main.layoutManager.monitors.length;
+    let minimum;
+    if (Tiling?.spaces?.spanAllMonitors) {
+        // In span mode every workspace spans all monitors, so we only need 1
+        // (or 2 with dynamic workspaces so there's always a spare slot)
+        minimum = Meta.prefs_get_dynamic_workspaces() ? 2 : 1;
+    } else {
+        minimum = Meta.prefs_get_dynamic_workspaces()
+            ? nMon + 1
+            : nMon;
+    }
 
     if (!Meta.prefs_get_dynamic_workspaces()) {
         // if less spaces than minimum, create!
@@ -664,8 +714,13 @@ export function _checkWorkspaces() {
     // Keep the active workspace
     emptyWorkspaces[activeWorkspaceIndex] = false;
 
-    // Keep a minimum number of spaces
-    for (i = 0; i < Math.max(Main.layoutManager.monitors.length, minimum); i++) {
+    // Keep a minimum number of spaces.
+    // In span mode a single Space covers all monitors, so only `minimum`
+    // workspaces are needed (not one per monitor).
+    const keepMin = Tiling?.spaces?.spanAllMonitors
+        ? minimum
+        : Math.max(Main.layoutManager.monitors.length, minimum);
+    for (i = 0; i < keepMin; i++) {
         emptyWorkspaces[i] = false;
     }
 
