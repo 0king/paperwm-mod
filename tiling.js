@@ -5573,6 +5573,141 @@ export function centerWindow(metaWindow, horizontal = true, vertical = false) {
 }
 
 /**
+ * Ordered viewport X targets (in space coords) for cycling a window through:
+ * primary left/center/right, then span (all monitors) left/center/right.
+ * Coinciding positions are deduped, so a single monitor collapses to
+ * left/center/right.
+ * @param {Meta.Window} metaWindow
+ * @param {Space} space
+ * @returns {number[]} target X positions in space coords
+ */
+export function getWindowPositionTargets(metaWindow, space) {
+    space = space ?? spaces.spaceOfWindow(metaWindow) ?? spaces.activeSpace;
+    if (!space || !metaWindow) {
+        return [];
+    }
+    const frame = metaWindow.get_frame_rect();
+    const margin = Settings.prefs.horizontal_margin;
+    const spanWA = space.workArea();
+    if (!spaces?.spanAllMonitors) {
+        return [
+            spanWA.x + margin,
+            spanWA.x + Math.round((spanWA.width - frame.width) / 2),
+            spanWA.x + spanWA.width - margin - frame.width,
+        ];
+    }
+    const primaryWA = getPrimaryWorkAreaSpanCoords();
+    const ordered = [
+        primaryWA.x + margin,
+        primaryWA.x + Math.round((primaryWA.width - frame.width) / 2),
+        primaryWA.x + primaryWA.width - margin - frame.width,
+        spanWA.x + margin,
+        spanWA.x + Math.round((spanWA.width - frame.width) / 2),
+        spanWA.x + spanWA.width - margin - frame.width,
+    ];
+    const deduped = [];
+    for (const x of ordered) {
+        if (!deduped.some(y => Math.abs(y - x) < 5)) {
+            deduped.push(x);
+        }
+    }
+    return deduped;
+}
+
+/**
+ * Current window X in space coords (visibleX for tiled windows,
+ * stage-to-space converted frame X for floating/scratch windows).
+ */
+function getWindowSpaceX(metaWindow, space) {
+    if (space.indexOf(metaWindow) !== -1) {
+        return space.visibleX(metaWindow);
+    }
+    const originX = spaces?.spanAllMonitors
+        ? getMonitorsBoundingBox().x
+        : space.monitor.x;
+    return metaWindow.get_frame_rect().x - originX;
+}
+
+/**
+ * Cycle the window through primary left/center/right then span
+ * left/center/right (space coords). Each invocation advances one step,
+ * wrapping around. Manual positioning sticks: a space stuck in an old
+ * CENTER/EDGE focus mode is silently dropped to DEFAULT (icons updated,
+ * no move) so future focuses don't override the cycled position.
+ * @param {Meta.Window} metaWindow
+ * @param {Space} space
+ * @param {number} direction 1 forward, -1 backwards
+ */
+export function cycleWindowPositionDirection(metaWindow, space, direction = 1) {
+    space = space ?? (metaWindow ? spaces.spaceOfWindow(metaWindow) : null) ?? spaces.activeSpace;
+    metaWindow = metaWindow ?? space?.selectedWindow;
+    if (!space || !metaWindow) {
+        return;
+    }
+    // Drop legacy auto-snap modes so the cycled position sticks.
+    if (space.focusMode !== FocusModes.DEFAULT) {
+        space.focusMode = FocusModes.DEFAULT;
+        try {
+            space.focusModeIcon?.setMode(FocusModes.DEFAULT);
+        } catch (_e) { /* ignore */ }
+        if (space.hasTopBar) {
+            try {
+                Topbar.focusButton?.setFocusMode(FocusModes.DEFAULT);
+            } catch (_e) { /* ignore */ }
+        }
+    }
+    const targets = getWindowPositionTargets(metaWindow, space);
+    if (targets.length === 0) {
+        return;
+    }
+    const currentX = getWindowSpaceX(metaWindow, space);
+    let closest = 0;
+    let best = Infinity;
+    for (let i = 0; i < targets.length; i++) {
+        const d = Math.abs(targets[i] - currentX);
+        if (d < best) {
+            best = d;
+            closest = i;
+        }
+    }
+    const next = (closest + direction + targets.length) % targets.length;
+    const targetX = targets[next];
+    if (space.indexOf(metaWindow) === -1) {
+        const originX = spaces?.spanAllMonitors
+            ? getMonitorsBoundingBox().x
+            : space.monitor.x;
+        const frame = metaWindow.get_frame_rect();
+        Scratch.easeScratch(metaWindow, targetX + originX, frame.y);
+    } else {
+        move_to(space, metaWindow, { x: targetX });
+    }
+}
+
+/**
+ * Cycle selected window forward: primary left/center/right,
+ * then span left/center/right.
+ */
+export function cycleWindowPosition(metaWindow, space) {
+    // keybindings call as (mw, space); topbar/buttons may call with no args
+    if (metaWindow && space === undefined && (Array.isArray(metaWindow) || metaWindow.selectedWindow !== undefined)) {
+        space = metaWindow;
+        metaWindow = space.selectedWindow;
+    }
+    cycleWindowPositionDirection(metaWindow, space, 1);
+}
+
+/**
+ * Cycle selected window backwards.
+ */
+export function cycleWindowPositionBackwards(metaWindow, space) {
+    if (metaWindow && space === undefined && (Array.isArray(metaWindow) || metaWindow.selectedWindow !== undefined)) {
+        space = metaWindow;
+        metaWindow = space.selectedWindow;
+    }
+    cycleWindowPositionDirection(metaWindow, space, -1);
+}
+
+/**
  * Activates the window under the mouse cursor, if any.
  */
 export function activateWindowUnderCursor(metaWindow, space) {
@@ -5676,16 +5811,28 @@ export function setFocusMode(mode, space) {
 }
 
 /**
- * Switches to the next focus mode for a space.
- * @param {Space} space
+ * Focus-mode key action: cycle the selected window through primary
+ * left/center/right then span (all monitors) left/center/right.
+ * Replaces the legacy space-wide DEFAULT/CENTER/EDGE rotation.
+ * Accepts (space), () or (metaWindow, space) call conventions.
+ * @param {Space|Meta.Window} spaceOrWindow
+ * @param {Space} maybeSpace
  */
-export function switchToNextFocusMode(space) {
-    space = space ?? spaces.activeSpace;
-    const numModes = Object.keys(FocusModes).length;
-    // for currMode we switch to 1-based to use it validly in remainder operation
-    const currMode = Object.values(FocusModes).indexOf(space.focusMode) + 1;
-    const nextMode = currMode % numModes;
-    setFocusMode(nextMode, space);
+export function switchToNextFocusMode(spaceOrWindow, maybeSpace) {
+    let space = maybeSpace ?? null;
+    let metaWindow = null;
+    if (space) {
+        metaWindow = (spaceOrWindow && !Array.isArray(spaceOrWindow) && spaceOrWindow.selectedWindow === undefined)
+            ? spaceOrWindow
+            : space.selectedWindow;
+    } else if (spaceOrWindow && (Array.isArray(spaceOrWindow) || spaceOrWindow.selectedWindow !== undefined)) {
+        space = spaceOrWindow;
+        metaWindow = space.selectedWindow;
+    } else {
+        metaWindow = spaceOrWindow ?? spaces.activeSpace?.selectedWindow;
+        space = spaces.activeSpace;
+    }
+    cycleWindowPositionDirection(metaWindow, space, 1);
 }
 
 /**

@@ -177,7 +177,7 @@
 
     <key type="as" name="switch-focus-mode">
       <default><![CDATA[['<Super><Shift>c']]]></default>
-      <summary>Switch between Window Focus Modes (e.g. default, center)</summary>
+      <summary>Cycle window through primary left/center/right then span left/center/right</summary>
     </key>
 
     <key type="as" name="switch-open-window-position">
