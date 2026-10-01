@@ -382,6 +382,12 @@ export class Space extends Array {
 
         // default focusMode (can be overriden by saved user pref in Space.init method)
         this.focusMode = FocusModes.DEFAULT;
+        // manual window position mode: null (legacy focusMode applies),
+        // 0 = primary left, 1 = primary center, 2 = primary right.
+        // Advanced by the focus-mode key, shared by the whole space so every
+        // window follows the same sequence (a per-window sequence diverges
+        // because all windows share one viewport offset).
+        this.positionMode = null;
         this.focusModeIcon = new Topbar.FocusIcon({
             name: 'panel',
             style_class: 'space-focus-mode-icon',
@@ -509,6 +515,7 @@ export class Space extends Array {
 
         // get previous focus mode (if exists)
         const focusMode = prevSpace?.focusMode;
+        const positionMode = prevSpace?.positionMode;
         this.addAll(prevSpace);
         saveState.prevSpaces.delete(workspace);
         this._populated = true;
@@ -519,12 +526,20 @@ export class Space extends Array {
 
         // restore focus mode (or fallback to default)
         setFocusMode(focusMode ?? getDefaultFocusMode(), this);
+        // restore manual cycle position (setFocusMode clears it)
+        if (positionMode !== null && positionMode !== undefined) {
+            this.positionMode = positionMode;
+        }
 
         this.getWindows().forEach(w => {
             animateWindow(w);
         });
 
         this.layout(false);
+        // snap restored manual position (layout with animate=false skips ensure)
+        if (this.positionMode !== null && this.positionMode !== undefined && this.selectedWindow) {
+            ensureViewport(this.selectedWindow, this, { force: true });
+        }
 
         this.signals.connect(workspace, "window-added", (ws, metawindow) => add_handler(ws, metawindow));
         this.signals.connect(workspace, "window-removed", (ws, metawindow) => remove_handler(ws, metawindow));
@@ -954,8 +969,10 @@ export class Space extends Array {
             this.moveDone();
         }
 
-        // if only one column on space, then center it
-        if (centerIfOne && this.length === 1) {
+        // if only one column on space, then center it (unless a manual
+        // left/center/right cycle position is active - it already snapped above)
+        if (centerIfOne && this.length === 1 &&
+            (this.positionMode === null || this.positionMode === undefined)) {
             const mw = this.getWindows()[0];
             centerWindow(mw);
         }
@@ -4765,6 +4782,21 @@ export function ensuredX(meta_window, space) {
         x = spaces?.spanAllMonitors
             ? getPrimaryWorkAreaSpanCoords().x
             : workArea.x;
+    } else if (space.positionMode !== null && space.positionMode !== undefined) {
+        // Manual cycle mode from the focus-mode key: every focused window
+        // goes to the same primary-monitor slot (0 = left, 1 = center,
+        // 2 = right), so w1/w2/w3 all follow one shared sequence.
+        const area = spaces?.spanAllMonitors
+            ? getPrimaryWorkAreaSpanCoords()
+            : workArea;
+        const margin = Settings.prefs.horizontal_margin;
+        if (space.positionMode === 0) {
+            x = area.x + margin;
+        } else if (space.positionMode === 2) {
+            x = area.x + area.width - margin - frame.width;
+        } else {
+            x = area.x + Math.round((area.width - frame.width) / 2);
+        }
     } else if (space.focusMode === FocusModes.EDGE) {
         // Align to the closest edge, with special cases for
         // only (center), first (left), and last (right) windows.
@@ -5574,9 +5606,8 @@ export function centerWindow(metaWindow, horizontal = true, vertical = false) {
 
 /**
  * Ordered viewport X targets (in space coords) for cycling a window through:
- * primary left/center/right, then span (all monitors) left/center/right.
- * Coinciding positions are deduped, so a single monitor collapses to
- * left/center/right.
+ * left/center/right of the primary monitor. In non-span mode this is the
+ * space's workArea.
  * @param {Meta.Window} metaWindow
  * @param {Space} space
  * @returns {number[]} target X positions in space coords
@@ -5588,30 +5619,14 @@ export function getWindowPositionTargets(metaWindow, space) {
     }
     const frame = metaWindow.get_frame_rect();
     const margin = Settings.prefs.horizontal_margin;
-    const spanWA = space.workArea();
-    if (!spaces?.spanAllMonitors) {
-        return [
-            spanWA.x + margin,
-            spanWA.x + Math.round((spanWA.width - frame.width) / 2),
-            spanWA.x + spanWA.width - margin - frame.width,
-        ];
-    }
-    const primaryWA = getPrimaryWorkAreaSpanCoords();
-    const ordered = [
-        primaryWA.x + margin,
-        primaryWA.x + Math.round((primaryWA.width - frame.width) / 2),
-        primaryWA.x + primaryWA.width - margin - frame.width,
-        spanWA.x + margin,
-        spanWA.x + Math.round((spanWA.width - frame.width) / 2),
-        spanWA.x + spanWA.width - margin - frame.width,
+    const area = spaces?.spanAllMonitors
+        ? getPrimaryWorkAreaSpanCoords()
+        : space.workArea();
+    return [
+        area.x + margin,
+        area.x + Math.round((area.width - frame.width) / 2),
+        area.x + area.width - margin - frame.width,
     ];
-    const deduped = [];
-    for (const x of ordered) {
-        if (!deduped.some(y => Math.abs(y - x) < 5)) {
-            deduped.push(x);
-        }
-    }
-    return deduped;
 }
 
 /**
@@ -5629,18 +5644,29 @@ function getWindowSpaceX(metaWindow, space) {
 }
 
 /**
- * Cycle the window through primary left/center/right then span
- * left/center/right (space coords). Each invocation advances one step,
- * wrapping around. Manual positioning sticks: a space stuck in an old
- * CENTER/EDGE focus mode is silently dropped to DEFAULT (icons updated,
- * no move) so future focuses don't override the cycled position.
+ * Cycle the window through left/center/right of the primary monitor
+ * (space coords). The sequence is space-wide: each key press advances
+ * `space.positionMode` (0 = left, 1 = center, 2 = right) and moves the
+ * selected window there, so w1/w2/w3 all follow the same order. (Deriving
+ * the next step from each window's own current X diverges because all
+ * windows share one viewport offset.) The first press starts from the step
+ * after the closest target to avoid a no-op. Manual positioning sticks: a
+ * space stuck in an old CENTER/EDGE focus mode is silently dropped to
+ * DEFAULT (icons updated, no move) so future focuses don't override the
+ * cycled position.
  * @param {Meta.Window} metaWindow
  * @param {Space} space
  * @param {number} direction 1 forward, -1 backwards
  */
 export function cycleWindowPositionDirection(metaWindow, space, direction = 1) {
-    space = space ?? (metaWindow ? spaces.spaceOfWindow(metaWindow) : null) ?? spaces.activeSpace;
-    metaWindow = metaWindow ?? space?.selectedWindow;
+    // The window's own space always wins: the keybinding hands us
+    // `spaces.selectedSpace`, which may be stale (another workspace), while
+    // `ensureViewport` (focus path) always uses `spaceOfWindow`. Using
+    // different Space objects for press vs focus splits `positionMode` state
+    // and the windows diverge again.
+    metaWindow = metaWindow ?? space?.selectedWindow ?? spaces.activeSpace?.selectedWindow;
+    const ownSpace = metaWindow ? spaces.spaceOfWindow(metaWindow) : null;
+    space = ownSpace ?? space ?? spaces.activeSpace;
     if (!space || !metaWindow) {
         return;
     }
@@ -5660,18 +5686,26 @@ export function cycleWindowPositionDirection(metaWindow, space, direction = 1) {
     if (targets.length === 0) {
         return;
     }
-    const currentX = getWindowSpaceX(metaWindow, space);
-    let closest = 0;
-    let best = Infinity;
-    for (let i = 0; i < targets.length; i++) {
-        const d = Math.abs(targets[i] - currentX);
-        if (d < best) {
-            best = d;
-            closest = i;
+    let mode;
+    if (space.positionMode === null || space.positionMode === undefined) {
+        // First press: start from the step after the closest target.
+        const currentX = getWindowSpaceX(metaWindow, space);
+        let closest = 0;
+        let best = Infinity;
+        for (let i = 0; i < targets.length; i++) {
+            const d = Math.abs(targets[i] - currentX);
+            if (d < best) {
+                best = d;
+                closest = i;
+            }
         }
+        mode = (closest + direction + targets.length) % targets.length;
+    } else {
+        mode = (space.positionMode + direction + targets.length) % targets.length;
     }
-    const next = (closest + direction + targets.length) % targets.length;
-    const targetX = targets[next];
+    space.positionMode = mode;
+    const targetX = targets[mode];
+    console.debug(`#paperwm cycle-window-position: mode=${mode} targetX=${targetX} window=${metaWindow?.title}`);
     if (space.indexOf(metaWindow) === -1) {
         const originX = spaces?.spanAllMonitors
             ? getMonitorsBoundingBox().x
@@ -5684,8 +5718,7 @@ export function cycleWindowPositionDirection(metaWindow, space, direction = 1) {
 }
 
 /**
- * Cycle selected window forward: primary left/center/right,
- * then span left/center/right.
+ * Cycle selected window forward: primary left/center/right.
  */
 export function cycleWindowPosition(metaWindow, space) {
     // keybindings call as (mw, space); topbar/buttons may call with no args
@@ -5726,6 +5759,9 @@ export function activateWindowUnderCursor(metaWindow, space) {
  */
 export function setFocusMode(mode, space) {
     space = space ?? spaces.activeSpace;
+    // An explicit legacy focus-mode change cancels the manual
+    // left/center/right cycle so the two systems don't fight.
+    space.positionMode = null;
     space.focusMode = mode;
     space.focusModeIcon.setMode(mode);
     if (space.hasTopBar) {
@@ -5811,9 +5847,9 @@ export function setFocusMode(mode, space) {
 }
 
 /**
- * Focus-mode key action: cycle the selected window through primary
- * left/center/right then span (all monitors) left/center/right.
- * Replaces the legacy space-wide DEFAULT/CENTER/EDGE rotation.
+ * Focus-mode key action: cycle the selected window through left/center/right
+ * of the primary monitor. Replaces the legacy space-wide
+ * DEFAULT/CENTER/EDGE rotation.
  * Accepts (space), () or (metaWindow, space) call conventions.
  * @param {Space|Meta.Window} spaceOrWindow
  * @param {Space} maybeSpace
