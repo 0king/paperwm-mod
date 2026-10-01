@@ -195,6 +195,11 @@ class ActionDispatcher {
     }
 
     _keyReleaseEvent(_actor, event) {
+        // Run release callbacks (e.g. drifting viewport snap) before
+        // finishing navigation, so the snapped selection is what gets
+        // accepted instead of the pre-release one.
+        this.keyReleaseCallbacks.forEach(callback => callback());
+
         if (this._destroy) {
             dismissDispatcher(DispatcherMode.KEYBOARD);
         }
@@ -209,7 +214,6 @@ class ActionDispatcher {
             this._resetNoModsTimeout();
         }
 
-        this.keyReleaseCallbacks.forEach(callback => callback());
         return Clutter.EVENT_STOP;
     }
 

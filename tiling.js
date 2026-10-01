@@ -209,7 +209,7 @@ let gsettings, backgroundSettings, interfaceSettings;
 let displayConfig;
 let saveState;
 let startupTimeoutId, timerId, fullscreenStartTimeout, stackSlurpTimeout, workspaceChangeTimeouts;
-let monitorChangeTimeout, driftTimeout;
+let monitorChangeTimeout, driftTimeout, driftSpace;
 let workspaceSettings;
 export let inGrab;
 export function enable(extension) {
@@ -336,6 +336,7 @@ export function disable() {
     monitorChangeTimeout = null;
     Utils.timeout_remove(driftTimeout);
     driftTimeout = null;
+    driftSpace = null;
 
     grabSignals.destroy();
     grabSignals = null;
@@ -1458,20 +1459,102 @@ export class Space extends Array {
         if (this.drifting) {
             return;
         }
+        if (this.length === 0) {
+            return;
+        }
+        // A previous drift on another space may have left its flag set if
+        // the global timeout was stolen; clear it so that space can drift
+        // again later.
+        if (driftSpace && driftSpace !== this) {
+            driftSpace.drifting = null;
+        }
         this.drifting = true;
+        driftSpace = this;
+        // Stop any in-flight viewport animation so direct panning below
+        // doesn't fight with it (previously each tick started a new
+        // ensureViewport animation, which pulled the viewport back to the
+        // start once the keys were released).
+        Easer.removeEase(this.cloneContainer);
+
+        const space = this;
+        const clearDriftState = () => {
+            Utils.timeout_remove(driftTimeout);
+            driftTimeout = null;
+            space.drifting = null;
+            if (driftSpace === space) {
+                driftSpace = null;
+            }
+        };
+        const stopDrift = () => {
+            if (!space.drifting) {
+                return;
+            }
+            clearDriftState();
+            // Snap to the nearest window so the viewport never rests in
+            // blank space. This runs before the navigator accepts (see
+            // ActionDispatcher._keyReleaseEvent), so the drifted position
+            // is kept instead of reverting to the pre-drift window.
+            const target = Gestures.findTargetWindow(space, dx < 0 ? -1 : 1)
+                || space.selectedWindow;
+            if (target) {
+                ensureViewport(target, space);
+            }
+        };
 
         // stop drifting on key_release
         Navigator.getActionDispatcher(DispatcherMode.KEYBOARD)
-            .addKeyReleaseCallback(() => {
-                Utils.timeout_remove(driftTimeout);
-                this.drifting = null;
-            });
+            .addKeyReleaseCallback(stopDrift);
+
+        // If the navigator goes away without a key-release (e.g. a
+        // modifier-less binding auto-finishes, overview opens, Esc),
+        // stop the timeout as well - otherwise it would scroll forever.
+        // Only snap when navigation was accepted; on abort let the
+        // navigator restore the original viewport.
+        const nav = Navigator.getNavigator();
+        nav.connect('destroy', (_nav, accepted) => {
+            if (!space.drifting) {
+                return;
+            }
+            if (typeof accepted !== 'boolean') {
+                accepted = nav.was_accepted;
+            }
+            clearDriftState();
+            if (accepted) {
+                const target = Gestures.findTargetWindow(space, dx < 0 ? -1 : 1)
+                    || space.selectedWindow;
+                if (target) {
+                    ensureViewport(target, space);
+                }
+            }
+        });
 
         Utils.timeout_remove(driftTimeout);
         driftTimeout = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1, () => {
-            Gestures.update(this, dx, 1);
-            this.selectedWindow = Gestures.findTargetWindow(this, dx < 0 ? -1 : 1);
-            ensureViewport(this.selectedWindow, this);
+            if (!space.drifting) {
+                return false;
+            }
+            // Free pan clamped to the tiled content, so we never drift
+            // into empty blank viewport. Valid range is
+            // [width - contentWidth, 0]; when content fits the viewport
+            // this collapses to 0 (no drift).
+            const contentWidth = space.cloneContainer.width;
+            const viewWidth = space.width;
+            const minX = Math.min(0, viewWidth - contentWidth);
+            let newX = space.cloneContainer.x - dx;
+            newX = Math.max(minX, Math.min(0, newX));
+            space.cloneContainer.x = newX;
+            space.targetX = newX;
+
+            const selected = Gestures.findTargetWindow(space, dx < 0 ? -1 : 1);
+            if (selected) {
+                if (selected !== space.selectedWindow) {
+                    space.selectedWindow = selected;
+                    updateSelection(space, selected);
+                    space.emit('select');
+                } else {
+                    space.selectedWindow = selected;
+                }
+            }
             return true;
         });
     }
