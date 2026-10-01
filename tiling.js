@@ -4684,7 +4684,17 @@ export function ensuredX(meta_window, space) {
             : workArea.x;
     } else if (space.focusMode === FocusModes.EDGE) {
         // Align to the closest edge, with special cases for
-        // only (center), first (left), and last (right) windows
+        // only (center), first (left), and last (right) windows.
+        // In span mode snap to the primary monitor's edges so focus
+        // stays on primary (span min/max would place first/last windows
+        // on secondary monitors).
+        let edgeMin = min;
+        let edgeMax = max;
+        if (spaces?.spanAllMonitors) {
+            const primaryWA = getPrimaryWorkAreaSpanCoords();
+            edgeMin = primaryWA.x;
+            edgeMax = primaryWA.x + primaryWA.width;
+        }
         if (index === 0 && space.length === 1) {
             if (spaces?.spanAllMonitors) {
                 const primaryWA = getPrimaryWorkAreaSpanCoords();
@@ -4693,11 +4703,11 @@ export function ensuredX(meta_window, space) {
                 x = min + Math.round((workArea.width - frame.width) / 2);
             }
         }
-        else if (index === 0 || (Math.abs(x - min) < Math.abs(x + frame.width - max) &&
+        else if (index === 0 || (Math.abs(x - edgeMin) < Math.abs(x + frame.width - edgeMax) &&
             index !== space.length - 1))
-            x = min + Settings.prefs.horizontal_margin;
+            x = edgeMin + Settings.prefs.horizontal_margin;
         else
-            x = max - Settings.prefs.horizontal_margin - frame.width;
+            x = edgeMax - Settings.prefs.horizontal_margin - frame.width;
     } else if (frame.width > workArea.width * 0.9 - 2 * (Settings.prefs.horizontal_margin + Settings.prefs.window_gap)) {
         // Consider the window to be wide and center it
         x = min + Math.round((workArea.width - frame.width) / 2);
@@ -5505,12 +5515,20 @@ export function setFocusMode(mode, space) {
     }
 
     const workArea = space.workArea();
+    const isSpan = spaces?.spanAllMonitors;
+    const primaryWA = isSpan ? getPrimaryWorkAreaSpanCoords() : null;
     // In span mode compare against the primary monitor's midpoint so the
     // saved unfocus side (left/right) is relative to primary, while the
     // window itself is centered on primary (see centerWindow).
-    const workAreaForMidpoint = spaces?.spanAllMonitors
-        ? getPrimaryWorkAreaSpanCoords()
+    const workAreaForMidpoint = isSpan
+        ? primaryWA
         : workArea;
+    // Edges to snap to: primary edges in span mode (so focus stays on
+    // primary), workArea edges otherwise.  Don't assume workArea.x === 0.
+    const edgeMin = isSpan ? primaryWA.x : workArea.x;
+    const edgeMax = isSpan
+        ? primaryWA.x + primaryWA.width
+        : workArea.x + workArea.width;
     const selectedWin = space.selectedWindow;
     // if centre also center selectedWindow
     switch (mode) {
@@ -5521,9 +5539,9 @@ export function setFocusMode(mode, space) {
             const winMidpoint = space.visibleX(selectedWin) + frame.width / 2;
             const workAreaMidpoint = workAreaForMidpoint.x + workAreaForMidpoint.width / 2;
             if (winMidpoint <= workAreaMidpoint) {
-                space.unfocusXPosition = 0;
+                space.unfocusXPosition = edgeMin;
             } else {
-                space.unfocusXPosition = workArea.width;
+                space.unfocusXPosition = edgeMax;
             }
             centerWindow(selectedWin);
         }
@@ -5541,15 +5559,31 @@ export function setFocusMode(mode, space) {
         let position;
         // eslint-disable-next-line eqeqeq
         if (space.indexOf(selectedWin) == 0) {
-            position = 0;
+            position = edgeMin;
         }
         // if windows is last, move to right edge
         // eslint-disable-next-line eqeqeq
         else if (space.indexOf(selectedWin) == space.length - 1) {
-            position = workArea.width;
+            position = edgeMax;
         }
         else {
             position = space.unfocusXPosition;
+        }
+        if (isSpan) {
+            // In span mode DEFAULT's ensureViewport only clamps to span
+            // edges, so it wouldn't add margins for primary edges.  Convert
+            // the edge flag into a margin-adjusted primary-edge position
+            // directly (robust to pre-fix saved values 0/workArea.width).
+            const frame = selectedWin?.get_frame_rect();
+            const fw = frame?.width ?? 0;
+            const leftPos = primaryWA.x + Settings.prefs.horizontal_margin;
+            const rightPos = primaryWA.x + primaryWA.width - Settings.prefs.horizontal_margin - fw;
+            const midpoint = primaryWA.x + primaryWA.width / 2;
+            if (position <= midpoint) {
+                position = leftPos;
+            } else {
+                position = rightPos;
+            }
         }
         // do the move
         move_to(space, space.selectedWindow, { x: position });
