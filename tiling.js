@@ -126,6 +126,38 @@ export function getPrimaryWorkAreaSpanCoords() {
 }
 
 /**
+ * Move `metaWindow` to the primary monitor (if not already there) so that
+ * entering fullscreen always happens on the primary monitor.
+ * Covers both `paper-toggle-fullscreen` (super+shift+f) and native (F11)
+ * fullscreen paths. Safe to call when already fullscreen: mutter moves the
+ * fullscreen window to the target monitor.
+ * @param {Meta.Window} metaWindow
+ * @returns {boolean} true if a monitor change was requested
+ */
+export function moveWindowToPrimaryMonitor(metaWindow) {
+    try {
+        const primary = Main.layoutManager?.primaryMonitor;
+        if (!primary || !metaWindow) {
+            return false;
+        }
+        let curIndex = -1;
+        try {
+            curIndex = metaWindow.get_monitor();
+        } catch (_e) {
+            curIndex = -1;
+        }
+        if (curIndex === primary.index) {
+            return false;
+        }
+        metaWindow.move_to_monitor(primary.index);
+        return true;
+    } catch (e) {
+        console.warn('#PaperWM moveWindowToPrimaryMonitor failed:', e?.message ?? e);
+        return false;
+    }
+}
+
+/**
    Scrolled and tiled per monitor workspace.
 
    The tiling is composed of an array of columns. A column being an array of
@@ -701,12 +733,19 @@ export class Space extends Array {
                     mw.move_resize_frame(true, f.x, f.y, targetWidth, targetHeight);
                 }
             } else {
-                const originX = spaces?.spanAllMonitors
-                    ? getMonitorsBoundingBox().x
-                    : space.monitor.x;
-                const originY = spaces?.spanAllMonitors
-                    ? getMonitorsBoundingBox().y
-                    : space.monitor.y;
+                // Fullscreen (and maximized) windows must live on the primary
+                // monitor in span mode - not on the bounding-box origin (which
+                // is the secondary monitor when it sits left/above primary).
+                let originX, originY;
+                if (spaces?.spanAllMonitors) {
+                    const primary = Main.layoutManager.primaryMonitor;
+                    const bb = getMonitorsBoundingBox();
+                    originX = primary?.x ?? bb.x;
+                    originY = primary?.y ?? bb.y;
+                } else {
+                    originX = space.monitor.x;
+                    originY = space.monitor.y;
+                }
                 mw.move_frame(true, originX, originY);
                 targetWidth = f.width;
                 targetHeight = f.height;
@@ -3783,6 +3822,13 @@ export function registerWindow(metaWindow) {
     signals.connect(metaWindow, 'size-changed', allocateClone);
     // Note: runs before gnome-shell's minimize handling code
     signals.connect(metaWindow, 'notify::fullscreen', () => {
+        // Fullscreen (e.g. F11) must land on the primary monitor first.
+        // move_to_monitor on an already-fullscreen window moves the
+        // fullscreen contents to the target monitor.
+        if (metaWindow.fullscreen) {
+            moveWindowToPrimaryMonitor(metaWindow);
+        }
+
         // if window is in a column, expel it
         barf(metaWindow, metaWindow);
 
@@ -4032,7 +4078,12 @@ export function resizeHandler(metaWindow) {
     if (metaWindow.fullscreen) {
         metaWindow._fullscreen_lock = true;
         space.hideSelection();
-        space.layout(false, { callback: moveTo(0, false), centerIfOne: false });
+        // In span mode the viewport must show the primary monitor (not the
+        // bounding-box origin, which can be a secondary monitor).
+        const fullscreenX = spaces?.spanAllMonitors
+            ? getPrimaryWorkAreaSpanCoords().x
+            : 0;
+        space.layout(false, { callback: moveTo(fullscreenX, false), centerIfOne: false });
         return;
     }
 
@@ -4625,7 +4676,12 @@ export function ensuredX(meta_window, space) {
             x = workArea.x + Math.round(workArea.width / 2 - frame.width / 2);
         }
     } else if (meta_window.fullscreen) {
-        x = workArea.x;
+        // Fullscreen always shows on the primary monitor. In span mode
+        // workArea.x is the bounding-box (union) origin, which is the
+        // secondary monitor when it sits left/above primary.
+        x = spaces?.spanAllMonitors
+            ? getPrimaryWorkAreaSpanCoords().x
+            : workArea.x;
     } else if (space.focusMode === FocusModes.EDGE) {
         // Align to the closest edge, with special cases for
         // only (center), first (left), and last (right) windows

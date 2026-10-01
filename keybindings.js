@@ -341,6 +341,8 @@ export function setupActions(settings) {
                 metaWindow.unmake_fullscreen();
             }
             else {
+                // Fullscreen must first go to the primary monitor.
+                Tiling.moveWindowToPrimaryMonitor(metaWindow);
                 metaWindow.make_fullscreen();
             }
             Tiling.resizeHandler(metaWindow);
