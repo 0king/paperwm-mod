@@ -275,9 +275,15 @@ export function enable(extension) {
 
         // Fix the stack overlay
         spaces.mru().reverse().forEach(s => {
-            // if s.selectedWindow exists and is in view, then use option moveto: false
+            // Centered spaces must snap on startup even when already fully
+            // visible - otherwise the focused window stays left-aligned until
+            // the next focus event or shortcut press.
             if (s.selectedWindow) {
-                let options = s.isFullyVisible(s.selectedWindow) ? { moveto: false } : { force: true };
+                const needsCenter = s.focusMode === FocusModes.CENTER ||
+                    (s.positionMode !== null && s.positionMode !== undefined);
+                let options = !needsCenter && s.isFullyVisible(s.selectedWindow)
+                    ? { moveto: false }
+                    : { force: true };
                 ensureViewport(s.selectedWindow, s, options);
             }
             s.monitor?.clickOverlay?.show();
@@ -380,8 +386,14 @@ export class Space extends Array {
         this._floating = [];
         this._populated = false;
 
-        // default focusMode (can be overriden by saved user pref in Space.init method)
-        this.focusMode = FocusModes.DEFAULT;
+        // default focusMode (overridden by saved user pref / default setting in Space.init).
+        // Init from default setting so focus auto-centers from startup without
+        // needing the focus-mode shortcut first.
+        let defaultMode = FocusModes.DEFAULT;
+        try {
+            defaultMode = getDefaultFocusMode();
+        } catch (_e) { /* Settings not ready yet - fall back to DEFAULT */ }
+        this.focusMode = defaultMode;
         // manual window position mode: null (legacy focusMode applies),
         // 0 = primary left, 1 = primary center, 2 = primary right.
         // Advanced by the focus-mode key, shared by the whole space so every
@@ -536,9 +548,16 @@ export class Space extends Array {
         });
 
         this.layout(false);
-        // snap restored manual position (layout with animate=false skips ensure)
-        if (this.positionMode !== null && this.positionMode !== undefined && this.selectedWindow) {
-            ensureViewport(this.selectedWindow, this, { force: true });
+        // layout with animate=false skips ensureViewport, so snap here:
+        // a restored manual cycle position, or CENTER focus mode (multi-window
+        // spaces would otherwise stay left-aligned until the next focus event
+        // or shortcut press instead of auto-centering from startup).
+        if (this.selectedWindow) {
+            if (this.positionMode !== null && this.positionMode !== undefined) {
+                ensureViewport(this.selectedWindow, this, { force: true });
+            } else if (this.focusMode === FocusModes.CENTER) {
+                ensureViewport(this.selectedWindow, this, { force: true });
+            }
         }
 
         this.signals.connect(workspace, "window-added", (ws, metawindow) => add_handler(ws, metawindow));
