@@ -163,14 +163,14 @@ export function setupActions(settings) {
         Tiling.selectUpSpace(mw, space, false);
     });
     registerNavigatorAction('switch-down-workspace-from-all-monitors', (mw, space) => {
-        Tiling.selectDownSpace(mw, space, true);
+        Tiling.selectDownSpace(mw, space, true, true);
     });
     registerNavigatorAction('switch-up-workspace-from-all-monitors', (mw, space) => {
-        Tiling.selectUpSpace(mw, space, true);
+        Tiling.selectUpSpace(mw, space, true, true);
     });
 
-    registerNavigatorAction('move-down-workspace', Tiling.moveDownSpace);
-    registerNavigatorAction('move-up-workspace', Tiling.moveUpSpace);
+    registerNavigatorAction('move-down-workspace', (mw, space) => Tiling.moveDownSpace(mw, space, true));
+    registerNavigatorAction('move-up-workspace', (mw, space) => Tiling.moveUpSpace(mw, space, true));
 
     registerPaperAction('toggle-top-and-position-bar', (_mw, space) => {
         const value = !space.settings.get_boolean('show-top-bar');

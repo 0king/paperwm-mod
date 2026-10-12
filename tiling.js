@@ -3374,7 +3374,7 @@ export const Spaces = class Spaces extends Map {
         }
     }
 
-    selectSequenceSpace(direction, move, fromAllMonitors = false) {
+    selectSequenceSpace(direction, move, fromAllMonitors = false, wrap = false) {
         // if in stack preview do not run sequence preview
         if (inPreview === PreviewMode.STACK) {
             return;
@@ -3386,6 +3386,10 @@ export const Spaces = class Spaces extends Map {
             monitorSpaces = this._getOrderedSpacesFromAllMonitors(currentSpace.monitor);
         } else {
             monitorSpaces = this._getOrderedSpaces(currentSpace.monitor);
+        }
+
+        if (monitorSpaces.length === 0) {
+            return;
         }
 
         let from = monitorSpaces.indexOf(this.selectedSpace);
@@ -3410,7 +3414,15 @@ export const Spaces = class Spaces extends Map {
         }
 
         if (to < 0 || to >= monitorSpaces.length) {
-            return;
+            if (!wrap) {
+                return;
+            }
+            // wrap around to the other end
+            if (to < 0) {
+                to = monitorSpaces.length - 1;
+            } else {
+                to = 0;
+            }
         }
 
         if (to === from && Easer.isEasing(newSpace.actor)) {
@@ -6165,12 +6177,12 @@ export function movePreviousSpaceBackwards(_mw, _space) {
     spaces.selectStackSpace(Meta.MotionDirection.UP, true);
 }
 
-export function selectDownSpace(mw, space, fromAllMonitors) {
-    spaces.selectSequenceSpace(Meta.MotionDirection.DOWN, false, fromAllMonitors);
+export function selectDownSpace(mw, space, fromAllMonitors, wrap = false) {
+    spaces.selectSequenceSpace(Meta.MotionDirection.DOWN, false, fromAllMonitors, wrap);
 }
 
-export function selectUpSpace(mw, space, fromAllMonitors) {
-    spaces.selectSequenceSpace(Meta.MotionDirection.UP, false, fromAllMonitors);
+export function selectUpSpace(mw, space, fromAllMonitors, wrap = false) {
+    spaces.selectSequenceSpace(Meta.MotionDirection.UP, false, fromAllMonitors, wrap);
 }
 
 export function switchDownOrElseWorkspace(mw, space) {
@@ -6183,12 +6195,12 @@ export function switchUpOrElseWorkspace(mw, space) {
         selectUpSpace(mw, space, false);
 }
 
-export function moveDownSpace(_mw, _space) {
-    spaces.selectSequenceSpace(Meta.MotionDirection.DOWN, true);
+export function moveDownSpace(_mw, _space, wrap = false) {
+    spaces.selectSequenceSpace(Meta.MotionDirection.DOWN, true, false, wrap);
 }
 
-export function moveUpSpace(_mw, _space) {
-    spaces.selectSequenceSpace(Meta.MotionDirection.UP, true);
+export function moveUpSpace(_mw, _space, wrap = false) {
+    spaces.selectSequenceSpace(Meta.MotionDirection.UP, true, false, wrap);
 }
 
 /**
