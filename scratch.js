@@ -64,11 +64,18 @@ export function makeScratch(metaWindow) {
     let fromTiling = false;
     // Relevant when called while navigating. Use the position the user actually sees.
     let windowPositionSeen;
+    // Capture owning space before stick() - after stick the window is on all
+    // workspaces and spaceOfWindow is no longer reliable.
+    let owningSpace = null;
 
     if (fromNonScratch) {
         // Figure out some stuff before the window is removed from the tiling
-        let space = Tiling.spaces.spaceOfWindow(metaWindow);
-        fromTiling = space.indexOf(metaWindow) > -1;
+        try {
+            owningSpace = Tiling.spaces?.spaceOfWindow(metaWindow) ?? null;
+        } catch (_e) {
+            owningSpace = null;
+        }
+        fromTiling = !!owningSpace && owningSpace.indexOf(metaWindow) > -1;
         if (fromTiling) {
             windowPositionSeen = metaWindow.clone
                 .get_transformed_position()
@@ -78,7 +85,36 @@ export function makeScratch(metaWindow) {
 
     metaWindow[float] = true;
     metaWindow.make_above();
-    metaWindow.stick();  // NB! Removes the window from the tiling (synchronously)
+    metaWindow.stick();  // NB! Historically removed the window from the tiling (synchronously)
+
+    // stick()/unstick() do not reliably emit workspace window-removed/window-added
+    // on all GNOME/Mutter versions, so the tiling can keep a stale entry (gap)
+    // until the next restart. Explicitly remove the window from its space here.
+    // removeWindow() is idempotent and triggers layout(), so this is a no-op if
+    // the window-removed handler already ran.
+    if (fromNonScratch) {
+        try {
+            if (owningSpace) {
+                if (owningSpace.indexOf(metaWindow) !== -1) {
+                    owningSpace.removeWindow(metaWindow);
+                } else {
+                    owningSpace.removeFloating(metaWindow);
+                }
+            } else if (Tiling.spaces) {
+                // Fallback: window was sticky/floating or space lookup failed -
+                // search all spaces so no stale clone is left behind.
+                Tiling.spaces.forEach(s => {
+                    if (s.indexOf(metaWindow) !== -1) {
+                        s.removeWindow(metaWindow);
+                    } else {
+                        s.removeFloating(metaWindow);
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn('#PaperWM makeScratch layout refresh failed:', e?.message ?? e);
+        }
+    }
 
     if (!metaWindow.minimized)
         Tiling.showWindow(metaWindow);
@@ -140,6 +176,21 @@ export function unmakeScratch(metaWindow) {
     metaWindow[float] = false;
     metaWindow.unmake_above();
     metaWindow.unstick();
+
+    // unstick() does not reliably emit workspace window-added on all
+    // GNOME/Mutter versions, so the window can stay untiled (invisible in the
+    // layout) until the next restart. Explicitly re-insert it into the tiling.
+    // insertWindow() is idempotent (early-returns if already tiled), so this is
+    // a no-op if the window-added handler already ran.
+    // Minimized windows stay out of the tiling until unminimize (handled via
+    // minimizeHandler), so skip re-insert while minimized.
+    if (!metaWindow.minimized) {
+        try {
+            Tiling.insertWindow(metaWindow, { existing: true });
+        } catch (e) {
+            console.warn('#PaperWM unmakeScratch layout refresh failed:', e?.message ?? e);
+        }
+    }
 }
 
 export function toggle(metaWindow) {
