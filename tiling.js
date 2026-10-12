@@ -261,6 +261,13 @@ export function enable(extension) {
     gsettings.connect('changed::selection-border-size', changedBorder);
     gsettings.connect('changed::selection-border-radius-top', changedBorder);
     gsettings.connect('changed::selection-border-radius-bottom', changedBorder);
+    gsettings.connect('changed::sync-taskbar-order', () => {
+        if (Settings.prefs.sync_taskbar_order) {
+            syncTaskbarOrder();
+        } else {
+            clearTaskbarOrder();
+        }
+    });
 
     backgroundGroup = Main.layoutManager._backgroundGroup;
 
@@ -304,6 +311,10 @@ export function enable(extension) {
                 s.viewportMoveToX(x);
             });
         });
+
+        // Apply Dash-to-Panel order override if the setting is on
+        // (layouts during init already sync, this covers restored sessions).
+        syncTaskbarOrder();
     };
 
     if (Main.layoutManager._startingUp) {
@@ -352,6 +363,8 @@ export function disable() {
     saveState.prepare();
     displayConfig.downgradeGnomeMonitors();
     displayConfig = null;
+    // Restore Dash-to-Panel's native sorting before tearing down spaces.
+    clearTaskbarOrder();
     spaces.destroy();
     inGrab = null;
     gsettings = null;
@@ -1003,6 +1016,12 @@ export class Space extends Array {
             w._last_layout_frame = w.get_frame_rect();
         });
 
+        // Mirror spatial order into `window._dtpPosition` for Dash-to-Panel
+        // (ungrouped icons / previews). Synchronous so DTP's deferred
+        // `_redisplay` (queued on window-added/removed) sees fresh values.
+        // No-op unless `sync-taskbar-order` is enabled. Cheap: O(windows).
+        syncTaskbarOrder();
+
         this.emit('layout', this);
     }
 
@@ -1263,6 +1282,7 @@ export class Space extends Array {
         this._floating.push(metaWindow);
         let clone = metaWindow.clone;
         Utils.actor_reparent(clone, this.actor);
+        syncTaskbarOrder();
         return true;
     }
 
@@ -1273,6 +1293,12 @@ export class Space extends Array {
         this._floating.splice(i, 1);
         // this.actor.remove_child(metaWindow.clone);
         Utils.actor_remove_child(this.actor, metaWindow.clone);
+        try {
+            if ('_dtpPosition' in metaWindow) {
+                delete metaWindow._dtpPosition;
+            }
+        } catch (_e) { /* ignore */ }
+        syncTaskbarOrder();
         return true;
     }
 
@@ -6334,6 +6360,68 @@ export function sortWindows(space, windows) {
     return space.cloneContainer.get_children()
         .filter(c => clones.includes(c))
         .map(c => c.meta_window);
+}
+
+/**
+ * Dash-to-Panel orders ungrouped taskbar icons (and window previews) by
+ * `MetaWindow.get_stable_sequence()` (creation order), which cannot be
+ * changed. Recent Dash-to-Panel versions prefer a `window._dtpPosition`
+ * override when present (set by manual icon drags).
+ *
+ * When the `sync-taskbar-order` setting is enabled, mirror PaperWM's
+ * spatial (left-to-right) order into `_dtpPosition` so the taskbar matches
+ * PaperWM. Positions are globally unique across workspaces (ordered by
+ * workspace index) so both `isolate-workspaces=true` and `false`
+ * configurations sort correctly. Floating windows are appended after tiled
+ * windows. Windows with `skip_taskbar` are still stamped (harmless: DTP
+ * filters them out).
+ */
+export function syncTaskbarOrder() {
+    if (!spaces || !Settings?.prefs?.sync_taskbar_order) {
+        return;
+    }
+    try {
+        let orderedSpaces = [...spaces.values()]
+            .sort((a, b) => a.workspace.index() - b.workspace.index());
+        let pos = 0;
+        for (let space of orderedSpaces) {
+            for (let w of space.getWindows()) {
+                try {
+                    w._dtpPosition = pos++;
+                } catch (_e) { /* ignore dead windows */ }
+            }
+            for (let w of space._floating) {
+                try {
+                    w._dtpPosition = pos++;
+                } catch (_e) { /* ignore dead windows */ }
+            }
+        }
+    } catch (e) {
+        console.error('PaperWM: syncTaskbarOrder failed', e);
+    }
+}
+
+/**
+ * Remove the `_dtpPosition` overrides set by `syncTaskbarOrder()`,
+ * restoring Dash-to-Panel's native creation-order sorting.
+ */
+export function clearTaskbarOrder() {
+    if (!spaces) {
+        return;
+    }
+    try {
+        for (let space of spaces.values()) {
+            for (let w of [...space.getWindows(), ...space._floating]) {
+                try {
+                    if ('_dtpPosition' in w) {
+                        delete w._dtpPosition;
+                    }
+                } catch (_e) { /* ignore dead windows */ }
+            }
+        }
+    } catch (e) {
+        console.error('PaperWM: clearTaskbarOrder failed', e);
+    }
 }
 
 export function rotated(list, dir = 1) {

@@ -62,6 +62,7 @@ export function enable(extension) {
         'show-focus-mode-icon',
         'show-open-position-icon',
         'topbar-mouse-scroll-enable',
+        'sync-taskbar-order',
         'disable-topbar-styling',
         'default-focus-mode',
         'gesture-enabled',

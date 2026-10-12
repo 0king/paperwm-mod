@@ -718,6 +718,12 @@
       <summary>Enables mouse scrolling on topbar to switch window (left/right)</summary>
     </key>
 
+    <key type="b" name="sync-taskbar-order">
+        <default>false</default>
+        <summary>Sync PaperWM window order to taskbars (e.g. Dash-to-Panel ungrouped icons)</summary>
+        <description>When enabled, PaperWM mirrors its left-to-right window order into the window sort key used by Dash-to-Panel (ungrouped taskbar icons and window previews), so the panel follows the tiling order instead of window creation order. Has no effect without a compatible taskbar.</description>
+    </key>
+
     <key type="d" name="animation-time">
         <default>0.25</default>
         <summary>Duration of animations in seconds</summary>

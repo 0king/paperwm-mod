@@ -476,6 +476,7 @@ class SettingsWidget {
         percentValueChanged('maximize-width-percent', 'maximize-width-percent');
         booleanStateChanged('maximize-within-tiling');
         booleanStateChanged('topbar-mouse-scroll-enable');
+        booleanStateChanged('sync-taskbar-order');
 
         // About
         // build version information
