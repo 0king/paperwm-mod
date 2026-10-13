@@ -7,6 +7,7 @@ import Meta from 'gi://Meta';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import * as AppFavorites from 'resource:///org/gnome/shell/ui/appFavorites.js';
 
 import {
     Settings, Utils, Lib, Gestures, Navigator, Grab, Topbar, Scratch, Stackoverlay, Background
@@ -3842,6 +3843,13 @@ export const Spaces = class Spaces extends Map {
 
         metaWindow.unmapped = true;
 
+        // Provisional PaperWM-order rank for taskbars (e.g. Dash-to-Panel
+        // ungrouped icons). This runs synchronously on display::window-created,
+        // i.e. before workspace::window-added, so taskbars that sort in
+        // deferred idle work already see tiling order on their first sort.
+        // Corrected by syncTaskbarOrder() once first-frame placement lands.
+        stampProvisionalTaskbarPosition(metaWindow);
+
         console.debug('window-created', metaWindow?.title);
         let actor = metaWindow.get_compositor_private();
         animateWindow(metaWindow);
@@ -6396,20 +6404,119 @@ export function syncTaskbarOrder() {
         let orderedSpaces = [...spaces.values()]
             .sort((a, b) => a.workspace.index() - b.workspace.index());
         let pos = 0;
+        let signature = [];
         for (let space of orderedSpaces) {
             for (let w of space.getWindows()) {
                 try {
                     w._dtpPosition = pos++;
+                    signature.push(w.get_stable_sequence());
                 } catch (_e) { /* ignore dead windows */ }
             }
             for (let w of space._floating) {
                 try {
                     w._dtpPosition = pos++;
+                    signature.push(w.get_stable_sequence());
                 } catch (_e) { /* ignore dead windows */ }
             }
         }
+        nudgeTaskbarOrder(signature.join(','));
     } catch (e) {
         console.error('PaperWM: syncTaskbarOrder failed', e);
+    }
+}
+
+/**
+ * Stamp a provisional PaperWM-order rank on a not-yet-placed window.
+ *
+ * Taskbars like Dash-to-Panel sort in deferred idle work triggered by
+ * workspace::window-added, which fires before our first-frame placement.
+ * Without this, a new window sorts by creation order on its first paint
+ * and nothing ever re-sorts it. The prediction reuses
+ * getOpenWindowPositionIndex(), the same function insertWindow() will use,
+ * so it is exact unless focus changes between window-created and
+ * first-frame (syncTaskbarOrder() corrects any drift, then nudges).
+ */
+export function stampProvisionalTaskbarPosition(metaWindow) {
+    if (!spaces || !Settings?.prefs?.sync_taskbar_order || !metaWindow) {
+        return;
+    }
+    try {
+        if (metaWindow.is_on_all_workspaces()) {
+            return; // never tiled into a Space; leave native sorting
+        }
+        let targetSpace = spaces.selectedSpace;
+        if (!targetSpace) {
+            return;
+        }
+        let insertIndex = getOpenWindowPositionIndex(targetSpace);
+        let pos = 0;
+        let orderedSpaces = [...spaces.values()]
+            .sort((a, b) => a.workspace.index() - b.workspace.index());
+        for (let space of orderedSpaces) {
+            if (space === targetSpace) {
+                // flat position of the insertion column = tiled windows in
+                // preceding columns (exact for column inserts; approximate
+                // for DOWN/UP stacks, which slurp post-insert)
+                let flat = 0;
+                for (let i = 0; i < Math.min(insertIndex, space.length); i++) {
+                    flat += space[i].length;
+                }
+                let windows = space.getWindows();
+                for (let i = 0; i < windows.length; i++) {
+                    try {
+                        windows[i]._dtpPosition = pos + (i < flat ? i : i + 1);
+                    } catch (_e) { /* ignore dead windows */ }
+                }
+                try {
+                    metaWindow._dtpPosition = pos + flat;
+                } catch (_e) { /* ignore */ }
+                pos += windows.length + 1;
+                for (let w of space._floating) {
+                    try {
+                        w._dtpPosition = pos++;
+                    } catch (_e) { /* ignore dead windows */ }
+                }
+            } else {
+                for (let w of space.getWindows()) {
+                    try {
+                        w._dtpPosition = pos++;
+                    } catch (_e) { /* ignore dead windows */ }
+                }
+                for (let w of space._floating) {
+                    try {
+                        w._dtpPosition = pos++;
+                    } catch (_e) { /* ignore dead windows */ }
+                }
+            }
+        }
+    } catch (e) {
+        console.error('PaperWM: stampProvisionalTaskbarPosition failed', e);
+    }
+}
+
+// Last order signature pushed to taskbars (see nudgeTaskbarOrder).
+let lastTaskbarSignature = null;
+
+/**
+ * Ask taskbars to re-sort after the order actually changed.
+ *
+ * Dash-to-Panel re-sorts only on window-added/removed, app-state-changed,
+ * favorites-changed, etc. — never on moves or on our late first-frame
+ * stamping. Emitting AppFavorites 'changed' reaches its
+ * `_queueRedisplay()` listener and forces a re-sort with the values
+ * syncTaskbarOrder() just wrote. The signature gate keeps this to real
+ * order changes (add/remove/move), never per-layout noise. Without a
+ * compatible taskbar the only effect is a cheap GNOME Dash refresh.
+ */
+function nudgeTaskbarOrder(signature) {
+    if (signature === lastTaskbarSignature) {
+        return;
+    }
+    lastTaskbarSignature = signature;
+    try {
+        AppFavorites.getAppFavorites().emit('changed');
+    } catch (e) {
+        console.error('PaperWM: nudgeTaskbarOrder failed', e);
     }
 }
 
@@ -6421,6 +6528,7 @@ export function clearTaskbarOrder() {
     if (!spaces) {
         return;
     }
+    lastTaskbarSignature = null;
     try {
         for (let space of spaces.values()) {
             for (let w of [...space.getWindows(), ...space._floating]) {
