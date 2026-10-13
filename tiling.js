@@ -1520,7 +1520,18 @@ export class Space extends Array {
             return;
         }
         if (this.drifting) {
-            return;
+            // Self-heal a stale flag: the drift timeout is global and
+            // single-shot, so a set flag with no active timeout means a
+            // previous session leaked (e.g. its tick threw) - clear it so
+            // drifting works again instead of staying dead until restart.
+            if (!driftTimeout) {
+                this.drifting = null;
+                if (driftSpace === this) {
+                    driftSpace = null;
+                }
+            } else {
+                return;
+            }
         }
         if (this.length === 0) {
             return;
@@ -1545,12 +1556,22 @@ export class Space extends Array {
         Easer.removeEase(this.cloneContainer);
 
         const space = this;
+        // findTargetWindow expects a boolean direction (true = right,
+        // false = left): passing -1 would be truthy and search rightward.
+        const right = dx > 0;
         const clearDriftState = () => {
             Utils.timeout_remove(driftTimeout);
             driftTimeout = null;
             space.drifting = null;
             if (driftSpace === space) {
                 driftSpace = null;
+            }
+        };
+        const snapToNearest = () => {
+            const target = Gestures.findTargetWindow(space, right)
+                || space.selectedWindow;
+            if (target) {
+                ensureViewport(target, space);
             }
         };
         const stopDrift = () => {
@@ -1562,10 +1583,12 @@ export class Space extends Array {
             // blank space. This runs before the navigator accepts (see
             // ActionDispatcher._keyReleaseEvent), so the drifted position
             // is kept instead of reverting to the pre-drift window.
-            const target = Gestures.findTargetWindow(space, dx < 0 ? -1 : 1)
-                || space.selectedWindow;
-            if (target) {
-                ensureViewport(target, space);
+            // Guarded: an error here must not break the dispatcher's
+            // _finish, which would wedge the keyboard grab.
+            try {
+                snapToNearest();
+            } catch (e) {
+                console.error('PaperWM: drift snap failed', e);
             }
         };
 
@@ -1588,10 +1611,10 @@ export class Space extends Array {
             }
             clearDriftState();
             if (accepted) {
-                const target = Gestures.findTargetWindow(space, dx < 0 ? -1 : 1)
-                    || space.selectedWindow;
-                if (target) {
-                    ensureViewport(target, space);
+                try {
+                    snapToNearest();
+                } catch (e) {
+                    console.error('PaperWM: drift snap failed', e);
                 }
             }
         });
@@ -1601,53 +1624,66 @@ export class Space extends Array {
             if (!space.drifting) {
                 return false;
             }
-            // Free pan clamped to the tiled content, so we never drift
-            // into empty blank viewport. Content occupies
-            // [contentStart, contentEnd] in strip coords; keeping that
-            // interval covering [0, viewWidth] gives x in
-            // [viewWidth - contentEnd, -contentStart]. The previous
-            // [minX, 0] range assumed offsets are never positive, which is
-            // false in span mode (showing primary content needs positive
-            // offsets) and collapsed to [0, 0] whenever content is
-            // narrower than the viewport, freezing drift entirely.
-            // When content is narrower than the viewport the range
-            // inverts - then pan freely and let the key-release snap
-            // settle on a window.
-            let contentStart = Infinity, contentEnd = -Infinity;
-            space.getWindows().forEach(w => {
-                const s = w.clone?.targetX;
-                if (!Number.isFinite(s)) {
-                    return;
+            try {
+                // Free pan clamped to the tiled content, so we never drift
+                // into empty blank viewport. Content occupies
+                // [contentStart, contentEnd] in strip coords; keeping that
+                // interval covering [0, viewWidth] gives x in
+                // [viewWidth - contentEnd, -contentStart]. The previous
+                // [minX, 0] range assumed offsets are never positive, which is
+                // false in span mode (showing primary content needs positive
+                // offsets) and collapsed to [0, 0] whenever content is
+                // narrower than the viewport, freezing drift entirely.
+                // When content is narrower than the viewport the range
+                // inverts - then pan freely and let the key-release snap
+                // settle on a window.
+                let contentStart = Infinity, contentEnd = -Infinity;
+                space.getWindows().forEach(w => {
+                    // Dead windows can throw on get_frame_rect: skip them
+                    // instead of killing the tick (which would wedge the
+                    // drifting flag and silently disable later drifts).
+                    try {
+                        const s = w.clone?.targetX;
+                        if (!Number.isFinite(s)) {
+                            return;
+                        }
+                        const ww = w.clone?.width || w.get_frame_rect().width;
+                        if (s < contentStart) {
+                            contentStart = s;
+                        }
+                        if (s + ww > contentEnd) {
+                            contentEnd = s + ww;
+                        }
+                    } catch (_e) {
+                        return;
+                    }
+                });
+                const viewWidth = space.width;
+                let newX = space.cloneContainer.x - dx;
+                if (Number.isFinite(contentStart) && Number.isFinite(contentEnd)) {
+                    const minTarget = viewWidth - contentEnd;
+                    const maxTarget = -contentStart;
+                    if (minTarget <= maxTarget) {
+                        newX = Math.max(minTarget, Math.min(maxTarget, newX));
+                    }
                 }
-                const ww = w.clone?.width || w.get_frame_rect().width;
-                if (s < contentStart) {
-                    contentStart = s;
-                }
-                if (s + ww > contentEnd) {
-                    contentEnd = s + ww;
-                }
-            });
-            const viewWidth = space.width;
-            let newX = space.cloneContainer.x - dx;
-            if (Number.isFinite(contentStart) && Number.isFinite(contentEnd)) {
-                const minTarget = viewWidth - contentEnd;
-                const maxTarget = -contentStart;
-                if (minTarget <= maxTarget) {
-                    newX = Math.max(minTarget, Math.min(maxTarget, newX));
-                }
-            }
-            space.cloneContainer.x = newX;
-            space.targetX = newX;
+                space.cloneContainer.x = newX;
+                space.targetX = newX;
 
-            const selected = Gestures.findTargetWindow(space, dx < 0 ? -1 : 1);
-            if (selected) {
-                if (selected !== space.selectedWindow) {
-                    space.selectedWindow = selected;
-                    updateSelection(space, selected);
-                    space.emit('select');
-                } else {
-                    space.selectedWindow = selected;
+                const selected = Gestures.findTargetWindow(space, right);
+                if (selected) {
+                    if (selected !== space.selectedWindow) {
+                        space.selectedWindow = selected;
+                        updateSelection(space, selected);
+                        space.emit('select');
+                    } else {
+                        space.selectedWindow = selected;
+                    }
                 }
+            } catch (e) {
+                console.error('PaperWM: drift tick failed, stopping drift', e);
+                clearDriftState();
+                return false;
             }
             return true;
         });
