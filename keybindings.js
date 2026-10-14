@@ -300,7 +300,12 @@ export function setupActions(settings) {
         Meta.KeyBindingFlags.PER_WINDOW);
 
     registerPaperAction("center-horizontally",
-        (mw, _space) => Tiling.centerWindow(mw, true, false),
+        (mw, space) => {
+            // Re-enable center-on-focus if drifting suspended it. Hooked on
+            // the action - not the keys - so rebound shortcuts behave the same.
+            Tiling.restoreFocusModeAfterDrift(mw, space);
+            Tiling.centerWindow(mw, true, false);
+        },
         Meta.KeyBindingFlags.PER_WINDOW);
 
     registerPaperAction("center-vertically",

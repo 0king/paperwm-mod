@@ -414,6 +414,11 @@ export class Space extends Array {
         // window follows the same sequence (a per-window sequence diverges
         // because all windows share one viewport offset).
         this.positionMode = null;
+        // Focus mode suspended by drifting: set when a drift starts while
+        // a focus mode is active (it would re-center on every focus and
+        // break the pan); cleared + restored by the center-window shortcut
+        // (restoreFocusModeAfterDrift). Session state only, like drifting.
+        this.suspendedFocusMode = null;
         this.focusModeIcon = new Topbar.FocusIcon({
             name: 'panel',
             style_class: 'space-focus-mode-icon',
@@ -1544,6 +1549,11 @@ export class Space extends Array {
         }
         this.drifting = true;
         driftSpace = this;
+        // Drifting needs free viewport positioning: suspend an active
+        // focus mode first (no-op when already DEFAULT). Hooked here - not
+        // on keys - so rebound drift shortcuts behave the same. Restored
+        // by the center-window shortcut (restoreFocusModeAfterDrift).
+        suspendFocusModeForDrift(this);
         // Manual pan releases the focus-mode cycle lock: otherwise the
         // key-release snap below (ensureViewport) would pull the viewport
         // back to the cycled left/center/right slot instead of keeping the
@@ -5976,6 +5986,59 @@ export function setFocusMode(mode, space) {
         ensureViewport(space.selectedWindow, space, { force: true });
         space.unfocusXPosition = null;
     }
+}
+
+/**
+ * Best-effort focus-mode icon sync: flips the mode field + icons only,
+ * unlike setFocusMode() which also moves windows. Used for drift
+ * suspend/restore, where any move would fight the pan/snap.
+ */
+function syncFocusModeIcons(space, mode) {
+    try {
+        space.focusModeIcon?.setMode(mode);
+    } catch (_e) { /* ignore */ }
+    if (space.hasTopBar) {
+        try {
+            Topbar.focusButton?.setFocusMode(mode);
+        } catch (_e) { /* ignore */ }
+    }
+}
+
+/**
+ * Suspend an active focus mode so drifting can pan freely: with e.g.
+ * CENTER, every focus/ensureViewport re-centers the window and yanks the
+ * viewport back. Remembers the mode on `space.suspendedFocusMode` for
+ * restoreFocusModeAfterDrift; no-op when already DEFAULT. Called from
+ * Space._drift, which covers drift-left/drift-right whatever keys
+ * trigger them (no hardcoded shortcuts).
+ */
+export function suspendFocusModeForDrift(space) {
+    space = space ?? spaces.activeSpace;
+    if (!space || space.focusMode === FocusModes.DEFAULT) {
+        return;
+    }
+    if (space.suspendedFocusMode === null || space.suspendedFocusMode === undefined) {
+        space.suspendedFocusMode = space.focusMode;
+    }
+    space.focusMode = FocusModes.DEFAULT;
+    syncFocusModeIcons(space, FocusModes.DEFAULT);
+}
+
+/**
+ * Re-enable a drift-suspended focus mode (center-window shortcut path).
+ * No-op unless a drift actually suspended one. Resolves the window's own
+ * space like cycleWindowPositionDirection (the passed selectedSpace may
+ * be stale).
+ */
+export function restoreFocusModeAfterDrift(metaWindow, space) {
+    space = (metaWindow && spaces.spaceOfWindow(metaWindow)) || space || spaces.activeSpace;
+    if (!space || space.suspendedFocusMode === null || space.suspendedFocusMode === undefined) {
+        return;
+    }
+    const mode = space.suspendedFocusMode;
+    space.suspendedFocusMode = null;
+    space.focusMode = mode;
+    syncFocusModeIcons(space, mode);
 }
 
 /**
