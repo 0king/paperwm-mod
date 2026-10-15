@@ -58,6 +58,7 @@ const actions = {
         'live-alt-tab-scratch',
         'live-alt-tab-scratch-backward',
         'switch-focus-mode',
+        'toggle-focus-mode-enabled',
         'switch-open-window-position',
         'open-window-position-right',
         'open-window-position-left',

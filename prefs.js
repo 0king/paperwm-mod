@@ -456,6 +456,7 @@ class SettingsWidget {
             },
             'default',
             0);
+        booleanStateChanged('focus-mode-enabled');
 
         enumOptionsChanged(
             'overview-ensure-viewport-animation',

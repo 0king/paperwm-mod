@@ -180,6 +180,11 @@
       <summary>Switch between Window Focus Modes (e.g. default, center)</summary>
     </key>
 
+    <key type="as" name="toggle-focus-mode-enabled">
+      <default><![CDATA[['<Super><Alt>c']]]></default>
+      <summary>Enable/disable window focus mode (auto-centering on focus)</summary>
+    </key>
+
     <key type="as" name="switch-open-window-position">
       <default><![CDATA[['<Super><Shift>w']]]></default>
       <summary>Switch between positions for creating/dropping windows</summary>
@@ -663,6 +668,12 @@
     <key type="i" name="default-focus-mode">
         <default>1</default>
         <summary>Set the default focus mode. 0:DEFAULT 1:CENTER 2:EDGE</summary>
+    </key>
+
+    <key type="b" name="focus-mode-enabled">
+        <default>true</default>
+        <summary>Enable window focus mode (auto-centering on focus)</summary>
+        <description>When disabled, focusing windows never auto-centers/moves them (DEFAULT behaviour is forced). Pressing the focus-mode cycle key re-enables it and advances to the next position.</description>
     </key>
 
     <key type="i" name="open-window-position">

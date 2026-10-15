@@ -65,6 +65,7 @@ export function enable(extension) {
         'sync-taskbar-order',
         'disable-topbar-styling',
         'default-focus-mode',
+        'focus-mode-enabled',
         'gesture-enabled',
         'gesture-horizontal-fingers',
         'gesture-workspace-fingers',

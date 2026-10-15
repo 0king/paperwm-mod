@@ -211,6 +211,10 @@ let displayConfig;
 let saveState;
 let startupTimeoutId, timerId, fullscreenStartTimeout, stackSlurpTimeout, workspaceChangeTimeouts;
 let monitorChangeTimeout, driftTimeout, driftSpace;
+// Set while the focus-mode cycle key auto-enables focus mode: skips the
+// `changed::focus-mode-enabled` default-restore so the cycle advances once
+// (single move) instead of restoring-then-cycling (double move).
+let suppressFocusModeEnabledRestore = false;
 let workspaceSettings;
 export let inGrab;
 export function enable(extension) {
@@ -269,6 +273,54 @@ export function enable(extension) {
             clearTaskbarOrder();
         }
     });
+    gsettings.connect('changed::focus-mode-enabled', () => {
+        if (!spaces) {
+            return;
+        }
+        if (suppressFocusModeEnabledRestore) {
+            return;
+        }
+        if (!isFocusModeEnabled()) {
+            // Drop to DEFAULT without moving windows: clear the manual
+            // cycle lock and any suspended drift mode so future focuses
+            // use plain DEFAULT clamping (no auto-center/move).
+            spaces.forEach(s => {
+                s.positionMode = null;
+                s.suspendedFocusMode = null;
+                s.unfocusXPosition = null;
+                s.focusMode = FocusModes.DEFAULT;
+                try {
+                    s.focusModeIcon?.setMode(FocusModes.DEFAULT);
+                } catch (_e) { /* ignore */ }
+                if (s.hasTopBar) {
+                    try {
+                        Topbar.focusButton?.setFocusMode(FocusModes.DEFAULT);
+                    } catch (_e) { /* ignore */ }
+                }
+            });
+        } else {
+            // Restore the default mode per space (centers when default
+            // is CENTER, like the default-focus-mode change path).
+            // Skipped if a space already holds a manual cycle position:
+            // the cycle key auto-enabled us (late signal delivery) and
+            // already moved - restoring would clobber it.
+            let cycled = false;
+            spaces.forEach(s => {
+                if (s.positionMode !== null && s.positionMode !== undefined) {
+                    cycled = true;
+                }
+            });
+            if (!cycled) {
+                spaces.forEach(s => {
+                    try {
+                        setFocusMode(getDefaultFocusMode(), s);
+                    } catch (e) {
+                        console.error(e);
+                    }
+                });
+            }
+        }
+    });
 
     backgroundGroup = Main.layoutManager._backgroundGroup;
 
@@ -287,8 +339,9 @@ export function enable(extension) {
             // visible - otherwise the focused window stays left-aligned until
             // the next focus event or shortcut press.
             if (s.selectedWindow) {
-                const needsCenter = s.focusMode === FocusModes.CENTER ||
-                    (s.positionMode !== null && s.positionMode !== undefined);
+                const needsCenter = isFocusModeEnabled() &&
+                    (s.focusMode === FocusModes.CENTER ||
+                    (s.positionMode !== null && s.positionMode !== undefined));
                 let options = !needsCenter && s.isFullyVisible(s.selectedWindow)
                     ? { moveto: false }
                     : { force: true };
@@ -555,10 +608,13 @@ export class Space extends Array {
         this.windowPositionBarBackdrop.height = Topbar.panelBox.height;
         this.setSpaceTopbarElementsVisible();
 
-        // restore focus mode (or fallback to default)
-        setFocusMode(focusMode ?? getDefaultFocusMode(), this);
-        // restore manual cycle position (setFocusMode clears it)
-        if (positionMode !== null && positionMode !== undefined) {
+        // restore focus mode (or fallback to default; forced DEFAULT
+        // while focus mode is disabled)
+        const restoredMode = isFocusModeEnabled() ? focusMode : undefined;
+        setFocusMode(restoredMode ?? getDefaultFocusMode(), this);
+        // restore manual cycle position (setFocusMode clears it; only
+        // while focus mode is enabled)
+        if (isFocusModeEnabled() && positionMode !== null && positionMode !== undefined) {
             this.positionMode = positionMode;
         }
 
@@ -571,7 +627,8 @@ export class Space extends Array {
         // a restored manual cycle position, or CENTER focus mode (multi-window
         // spaces would otherwise stay left-aligned until the next focus event
         // or shortcut press instead of auto-centering from startup).
-        if (this.selectedWindow) {
+        // Skipped entirely while focus mode is disabled.
+        if (isFocusModeEnabled() && this.selectedWindow) {
             if (this.positionMode !== null && this.positionMode !== undefined) {
                 ensureViewport(this.selectedWindow, this, { force: true });
             } else if (this.focusMode === FocusModes.CENTER) {
@@ -1008,8 +1065,9 @@ export class Space extends Array {
         }
 
         // if only one column on space, then center it (unless a manual
-        // left/center/right cycle position is active - it already snapped above)
-        if (centerIfOne && this.length === 1 &&
+        // left/center/right cycle position is active - it already snapped above;
+        // never while focus mode is disabled)
+        if (isFocusModeEnabled() && centerIfOne && this.length === 1 &&
             (this.positionMode === null || this.positionMode === undefined)) {
             const mw = this.getWindows()[0];
             centerWindow(mw);
@@ -1216,7 +1274,8 @@ export class Space extends Array {
 
         // Make sure the cloneContainer is in a clean state (centered) before layout.
         // In span mode center on primary so it agrees with layout()/centerWindow().
-        if (this.length === 1) {
+        // Skipped while focus mode is disabled (leave DEFAULT placement).
+        if (isFocusModeEnabled() && this.length === 1) {
             const area = spaces?.spanAllMonitors
                 ? getPrimaryWorkAreaSpanCoords()
                 : this.workArea();
@@ -4366,7 +4425,7 @@ export function resizeHandler(metaWindow) {
         space.queueLayout(true, { callback, centerIfOne: false });
     }
 
-    if (space.length === 1) {
+    if (isFocusModeEnabled() && space.length === 1) {
         centerWindow(metaWindow);
     }
 }
@@ -4919,7 +4978,11 @@ export function ensuredX(meta_window, space) {
     let min = workArea.x;
     let max = min + workArea.width;
 
-    if (space.focusMode === FocusModes.CENTER) {
+    // While focus mode is disabled every branch below is skipped so focus
+    // never auto-centers/moves windows (plain DEFAULT clamping applies).
+    const focusEnabled = isFocusModeEnabled();
+
+    if (focusEnabled && space.focusMode === FocusModes.CENTER) {
         // window switching should centre focus.
         // In span mode centre on the primary monitor (not on the bezel
         // between monitors).
@@ -4936,7 +4999,7 @@ export function ensuredX(meta_window, space) {
         x = spaces?.spanAllMonitors
             ? getPrimaryWorkAreaSpanCoords().x
             : workArea.x;
-    } else if (space.positionMode !== null && space.positionMode !== undefined) {
+    } else if (focusEnabled && space.positionMode !== null && space.positionMode !== undefined) {
         // Manual cycle mode from the focus-mode key: every focused window
         // goes to the same primary-monitor slot (0 = left, 1 = center,
         // 2 = right), so w1/w2/w3 all follow one shared sequence.
@@ -4951,7 +5014,7 @@ export function ensuredX(meta_window, space) {
         } else {
             x = area.x + Math.round((area.width - frame.width) / 2);
         }
-    } else if (space.focusMode === FocusModes.EDGE) {
+    } else if (focusEnabled && space.focusMode === FocusModes.EDGE) {
         // Align to the closest edge, with special cases for
         // only (center), first (left), and last (right) windows.
         // In span mode snap to the primary monitor's edges so focus
@@ -5227,9 +5290,46 @@ export function setAllWorkspacesInactive() {
 }
 
 /**
- * Returns the default focus mode (can be user-defined).
+ * Whether window focus mode is enabled. While disabled, focusing windows
+ * never auto-centers/moves them (DEFAULT behaviour is forced everywhere).
+ * Defaults to true so pre-existing installs keep their behaviour.
+ */
+export function isFocusModeEnabled() {
+    return Settings.prefs?.focus_mode_enabled ?? true;
+}
+
+/**
+ * Persist the focus-mode enabled flag (drives the prefs switch via dconf).
+ */
+export function setFocusModeEnabled(enabled) {
+    try {
+        gsettings?.set_boolean('focus-mode-enabled', !!enabled);
+    } catch (e) {
+        console.error(e);
+    }
+    // Optimistic local update in case the `changed` signal round-trips late.
+    try {
+        if (Settings.prefs) {
+            Settings.prefs.focus_mode_enabled = !!enabled;
+        }
+    } catch (_e) { /* ignore */ }
+}
+
+/**
+ * Keybinding action: toggle the focus-mode enabled flag.
+ */
+export function toggleFocusModeEnabled() {
+    setFocusModeEnabled(!isFocusModeEnabled());
+}
+
+/**
+ * Returns the default focus mode (can be user-defined). Forced to DEFAULT
+ * while focus mode is disabled so new spaces never auto-center.
  */
 export function getDefaultFocusMode() {
+    if (!isFocusModeEnabled()) {
+        return FocusModes.DEFAULT;
+    }
     // find matching focus mode
     const mode = Settings.prefs.default_focus_mode;
     const modes = FocusModes;
@@ -5824,6 +5924,17 @@ export function cycleWindowPositionDirection(metaWindow, space, direction = 1) {
     if (!space || !metaWindow) {
         return;
     }
+    // Pressing the cycle key while focus mode is disabled re-enables it
+    // and advances once (single move): suppress the enabled-restore that
+    // would otherwise center first and then cycle (double move).
+    if (!isFocusModeEnabled()) {
+        suppressFocusModeEnabledRestore = true;
+        try {
+            setFocusModeEnabled(true);
+        } finally {
+            suppressFocusModeEnabledRestore = false;
+        }
+    }
     // Drop legacy auto-snap modes so the cycled position sticks.
     if (space.focusMode !== FocusModes.DEFAULT) {
         space.focusMode = FocusModes.DEFAULT;
@@ -5913,6 +6024,10 @@ export function activateWindowUnderCursor(metaWindow, space) {
  */
 export function setFocusMode(mode, space) {
     space = space ?? spaces.activeSpace;
+    // While focus mode is disabled, never leave DEFAULT (no auto-move).
+    if (!isFocusModeEnabled()) {
+        mode = FocusModes.DEFAULT;
+    }
     // An explicit legacy focus-mode change cancels the manual
     // left/center/right cycle so the two systems don't fight.
     space.positionMode = null;
@@ -6056,7 +6171,8 @@ export function restoreFocusModeAfterDrift(metaWindow, space) {
 /**
  * Focus-mode key action: cycle the selected window through left/center/right
  * of the primary monitor. Replaces the legacy space-wide
- * DEFAULT/CENTER/EDGE rotation.
+ * DEFAULT/CENTER/EDGE rotation. Pressing it while focus mode is disabled
+ * re-enables focus mode and advances once.
  * Accepts (space), () or (metaWindow, space) call conventions.
  * @param {Space|Meta.Window} spaceOrWindow
  * @param {Space} maybeSpace

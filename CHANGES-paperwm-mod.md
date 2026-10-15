@@ -191,14 +191,25 @@ Mirrors PaperWM left-to-right order into Dash-to-Panel ungrouped icons/previews,
 |-----|------|---------------------|----|
 | `default-focus-mode` | `i` | `0 → 1` (DEFAULT → CENTER) | existing “Default focus mode” row |
 | `sync-taskbar-order` | `b` (new) | `false` | new `Settings.ui` switch + `prefs.js` binding |
+| `focus-mode-enabled` | `b` (new) | `true` | new “Enable window focus mode” switch + `prefs.js` binding |
+| `toggle-focus-mode-enabled` (keybindings) | `as` (new) | `['<Super><Alt>c']` | keybindings prefs row (`prefsKeybinding.js`) |
 
 After editing `gschema.xml`, `schemas/gschemas.compiled` must be regenerated (`glib-compile-schemas schemas/`); commits `4476975`/`83e5f75` include the binary.
+
+## 13) Focus-mode enable/disable kill-switch
+
+New `focus-mode-enabled` setting (bool, default `true` — existing installs keep current behavior). While disabled, DEFAULT behavior is forced everywhere: focusing/clicking windows never auto-centers/moves them.
+
+- `tiling.js`: `isFocusModeEnabled()` gate; `ensuredX` skips the CENTER / `positionMode` / EDGE branches (plain DEFAULT clamping applies); `getDefaultFocusMode()` and `setFocusMode()` coerce to DEFAULT; single-window auto-center skipped in `Space.layout` (`centerIfOne`), `addWindow` pre-layout centering, and `resizeHandler`; startup and state-restore snaps skipped; new-space restores ignore saved `focusMode`/`positionMode`. Explicit one-shot centering (`center-horizontally`, Super+C) still works while disabled.
+- Cycle key (`switch-focus-mode`, e.g. Super+C): pressing it while disabled re-enables focus mode and advances `positionMode` left/center/right in one press (single move — `suppressFocusModeEnabledRestore` skips the enable-restore that would otherwise center-then-cycle). Topbar/focus-icon clicks go through the same path, so they auto-enable too.
+- Live toggle: `changed::focus-mode-enabled` drops all spaces to DEFAULT on disable (clears `positionMode`/`suspendedFocusMode`, syncs icons, no window move); on enable restores the default mode per space (skipped if a space already holds a cycle position from a late-delivered auto-enable).
+- Toggle key: `toggle-focus-mode-enabled` (default `<Super><Alt>c` — `<Super><Shift>c` stays on the cycle action to avoid a duplicate default; rebind after moving the cycle key if desired).
 
 ## Kill-switches & rollback
 
 - Span mode: `tiling.js:52` `SPAN_ALL_MONITORS = true → false` restores upstream per-monitor Spaces without reverting other fixes (overview/patches guards are span-conditional).
 - Taskbar sync: `sync-taskbar-order = false` (default) or `clearTaskbarOrder()` on disable — zero effect without a compatible taskbar (only a cheap GNOME Dash refresh via `AppFavorites.changed`).
-- Focus behavior: set `default-focus-mode = 0` to restore upstream DEFAULT; pressing the legacy focus-mode UI still calls `setFocusMode` (clears `positionMode`).
+- Focus behavior: set `default-focus-mode = 0` to restore upstream DEFAULT; pressing the legacy focus-mode UI still calls `setFocusMode` (clears `positionMode`). Set `focus-mode-enabled = false` to disable all focus auto-centering (cycle key re-enables and advances once).
 - Wrap: callers in `keybindings.js` pass `wrap=true`; change to `false`/omit to restore clamping.
 
 ## Verification (reproduce this doc)

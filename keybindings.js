@@ -252,6 +252,9 @@ export function setupActions(settings) {
     registerPaperAction("switch-focus-mode",
         Tiling.switchToNextFocusMode);
 
+    registerPaperAction("toggle-focus-mode-enabled",
+        () => Tiling.toggleFocusModeEnabled());
+
     registerPaperAction("switch-open-window-position",
         Topbar.switchToNextOpenPositionMode);
     registerPaperAction("open-window-position-right",
