@@ -501,10 +501,192 @@ class SettingsWidget {
             });
         }
 
+        this._initBackupRestore();
+
         // set text to buffer
         const aboutVersionView = this.builder.get_object('about_version_textView');
         aboutVersionView.set_wrap_mode(Gtk.WrapMode.WORD_CHAR);
         aboutVersionView.set_buffer(buffer);
+    }
+
+    /**
+     * Wires up the Backup & Restore buttons in the About tab.
+     */
+    _initBackupRestore() {
+        const exportButton = this.builder.get_object('about_export_button');
+        if (exportButton) {
+            exportButton.connect('clicked', () => this._exportSettings());
+        }
+        const importButton = this.builder.get_object('about_import_button');
+        if (importButton) {
+            importButton.connect('clicked', () => this._importSettings());
+        }
+    }
+
+    /**
+     * Desktop folder used as the default location for settings backup files.
+     * @returns String
+     */
+    _getDesktopPath() {
+        try {
+            const desktop = GLib.get_user_special_dir(GLib.UserDirectory.DIRECTORY_DESKTOP);
+            if (desktop && GLib.file_test(desktop, GLib.FileTest.IS_DIR)) {
+                return desktop;
+            }
+        } catch (e) {
+            console.warn(`Could not resolve XDG Desktop dir: ${e.message}`);
+        }
+        return GLib.build_filenamev([GLib.get_home_dir(), 'Desktop']);
+    }
+
+    /**
+     * Shows backup/restore feedback in the About tab.
+     */
+    _setBackupStatus(message, isError = false) {
+        const label = this.builder.get_object('about_backup_status_label');
+        if (!label) {
+            return;
+        }
+        label.set_text(message);
+        if (isError) {
+            label.add_css_class('error');
+        } else {
+            label.remove_css_class('error');
+        }
+    }
+
+    /**
+     * Runs `dconf dump` for all PaperWM settings (main, keybindings, workspaces).
+     * @returns String dconf dump contents
+     */
+    _dconfDump() {
+        const proc = Gio.Subprocess.new(
+            ['dconf', 'dump', '/org/gnome/shell/extensions/paperwm/'],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
+        );
+        const [ok, stdout, stderr] = proc.communicate_utf8(null, null);
+        if (!ok || !proc.get_successful()) {
+            throw new Error((stderr || '').trim() || 'dconf dump failed');
+        }
+        if (!stdout || !stdout.trim()) {
+            throw new Error('No settings to export (dconf dump was empty)');
+        }
+        return stdout;
+    }
+
+    /**
+     * Loads dconf dump contents into PaperWM settings.
+     */
+    _dconfLoad(contents) {
+        const proc = Gio.Subprocess.new(
+            ['dconf', 'load', '/org/gnome/shell/extensions/paperwm/'],
+            Gio.SubprocessFlags.STDIN_PIPE |
+                Gio.SubprocessFlags.STDOUT_PIPE |
+                Gio.SubprocessFlags.STDERR_PIPE
+        );
+        const [ok, , stderr] = proc.communicate_utf8(contents, null);
+        if (!ok || !proc.get_successful()) {
+            throw new Error((stderr || '').trim() || 'dconf load failed');
+        }
+    }
+
+    /**
+     * Exports user settings to a backup file (defaults to Desktop).
+     */
+    _exportSettings() {
+        const chooser = new Gtk.FileChooserDialog({
+            action: Gtk.FileChooserAction.SAVE,
+            title: 'Export PaperWM Settings',
+            modal: true,
+            transient_for: this.window.get_root(),
+            select_multiple: false,
+        });
+        chooser.add_button('Cancel', Gtk.ResponseType.CANCEL);
+        chooser.add_button('Save', Gtk.ResponseType.OK);
+        chooser.set_do_overwrite_confirmation(true);
+        try {
+            chooser.set_current_folder(Gio.File.new_for_path(this._getDesktopPath()));
+        } catch (e) {
+            console.warn(`Could not set default backup folder: ${e.message}`);
+        }
+        const timestamp = GLib.DateTime.new_now_local().format('%Y%m%d-%H%M%S');
+        chooser.set_current_name(`paperwm-mod-settings-${timestamp}.ini`);
+        chooser.connect('response', (dialog, response) => {
+            if (response === Gtk.ResponseType.OK) {
+                try {
+                    const file = chooser.get_file();
+                    if (!file) {
+                        throw new Error('No file selected');
+                    }
+                    const dump = this._dconfDump();
+                    file.replace_contents(
+                        new TextEncoder().encode(dump),
+                        null,
+                        false,
+                        Gio.FileCreateFlags.REPLACE_DESTINATION,
+                        null
+                    );
+                    this._setBackupStatus(`Settings exported to ${file.get_path()}`);
+                } catch (e) {
+                    console.error(e);
+                    this._setBackupStatus(`Export failed: ${e.message}`, true);
+                }
+            }
+            chooser.destroy();
+        });
+        chooser.show();
+    }
+
+    /**
+     * Imports user settings from a backup file (defaults to Desktop).
+     */
+    _importSettings() {
+        const chooser = new Gtk.FileChooserDialog({
+            action: Gtk.FileChooserAction.OPEN,
+            title: 'Import PaperWM Settings',
+            modal: true,
+            transient_for: this.window.get_root(),
+            select_multiple: false,
+        });
+        chooser.add_button('Cancel', Gtk.ResponseType.CANCEL);
+        chooser.add_button('Open', Gtk.ResponseType.OK);
+        try {
+            chooser.set_current_folder(Gio.File.new_for_path(this._getDesktopPath()));
+        } catch (e) {
+            console.warn(`Could not set default backup folder: ${e.message}`);
+        }
+        const backupFilter = new Gtk.FileFilter();
+        backupFilter.set_name('Settings backup (*.ini)');
+        backupFilter.add_pattern('*.ini');
+        chooser.add_filter(backupFilter);
+        const allFilter = new Gtk.FileFilter();
+        allFilter.set_name('All files');
+        allFilter.add_pattern('*');
+        chooser.add_filter(allFilter);
+        chooser.connect('response', (dialog, response) => {
+            if (response === Gtk.ResponseType.OK) {
+                try {
+                    const file = chooser.get_file();
+                    if (!file) {
+                        throw new Error('No file selected');
+                    }
+                    const [, contents] = file.load_contents(null);
+                    const text = new TextDecoder('utf-8').decode(contents);
+                    if (!text.trim() || !text.includes('[') || !text.includes('=')) {
+                        throw new Error('File does not look like a PaperWM settings backup');
+                    }
+                    this._dconfLoad(text);
+                    this._setBackupStatus(
+                        `Settings imported from ${file.get_path()}. Close and reopen Settings to see all changes.`
+                    );
+                } catch (e) {
+                    console.error(e);
+                    this._setBackupStatus(`Import failed: ${e.message}`, true);
+                }
+            }
+            chooser.destroy();
+        });
+        chooser.show();
     }
 
     /**
