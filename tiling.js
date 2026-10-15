@@ -4684,6 +4684,7 @@ export function insertWindow(metaWindow, options = {}) {
         // secondary monitors.
         connectSizeChanged();
         showWindow(metaWindow);
+        clearTaskbarPosition(metaWindow);
         return;
     } else if (Scratch.isScratchWindow(metaWindow)) {
         // And make sure scratch windows are stuck
@@ -6617,6 +6618,19 @@ function nudgeTaskbarOrder(signature) {
     } catch (e) {
         console.error('PaperWM: nudgeTaskbarOrder failed', e);
     }
+}
+
+/**
+ * Remove a single window's `_dtpPosition` rank (e.g. windows that never
+ * join a Space: scratch, sticky, or never-tiled windows would otherwise
+ * keep a stale rank colliding with tiled windows).
+ */
+export function clearTaskbarPosition(metaWindow) {
+    try {
+        if (metaWindow && '_dtpPosition' in metaWindow) {
+            delete metaWindow._dtpPosition;
+        }
+    } catch (_e) { /* ignore dead windows */ }
 }
 
 /**

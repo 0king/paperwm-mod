@@ -116,6 +116,12 @@ export function makeScratch(metaWindow) {
         }
     }
 
+    // Stuck windows are in no Space: drop any taskbar-order rank so it
+    // can't collide with tiled windows' ranks (Dash-to-Panel sorts by it).
+    try {
+        Tiling.clearTaskbarPosition?.(metaWindow);
+    } catch (_e) { /* ignore */ }
+
     if (!metaWindow.minimized)
         Tiling.showWindow(metaWindow);
 
