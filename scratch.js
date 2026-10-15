@@ -125,16 +125,14 @@ export function makeScratch(metaWindow) {
     if (!metaWindow.minimized)
         Tiling.showWindow(metaWindow);
 
-    // A newly-scratched window must stack above existing always-on-top
-    // windows: make_above() only sets the layer flag, it doesn't raise
-    // within it, so without this the window opens behind a focused
-    // always-on-top window and never receives focus (e.g. Vicinae).
-    // raise() only affects stacking, not focus; minimized windows stay hidden.
-    if (fromNonScratch && !metaWindow.minimized) {
-        try {
-            metaWindow.raise();
-        } catch (_e) { /* ignore dead windows */ }
-    }
+    // NOTE: no synchronous raise()/activate here. makeScratch() runs on the
+    // `first-frame` stack for new windows (via insertWindow) and shows the
+    // actor synchronously, so raising/activating now re-enters Mutter while
+    // the window is still being mapped - fatal for launcher overlays like
+    // Vicinae (session crash -> logout). make_above() above already puts the
+    // window in the always-on-top layer; focus is deferred to IDLE with
+    // liveness guards by activateWindowAfterRendered in tiling.js.
+    // Activation raises within the above layer by itself.
 
     if (fromTiling) {
         let f = metaWindow.get_frame_rect();

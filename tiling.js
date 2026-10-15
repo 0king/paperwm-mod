@@ -4718,15 +4718,17 @@ export function insertWindow(metaWindow, options = {}) {
             // synchronously, so connecting afterwards misses 'show' and the
             // window never takes focus (seen when an always-on-top window
             // holds focus and a new scratch window e.g. Vicinae opens).
-            activateWindowAfterRendered(actor, metaWindow);
-            Scratch.makeScratch(metaWindow);
-            // The actor may already have been visible (one-shot above then
-            // never fires): raise above other always-on-top windows and
-            // take focus directly.
+            // Never raise/activate synchronously here: insertWindow() runs on
+            // `first-frame`, so direct raise/activate re-enters Mutter while
+            // the window is still being mapped - fatal for launcher overlays
+            // like Vicinae (session crash -> logout). Focus is deferred to
+            // IDLE with liveness guards inside activateWindowAfterRendered.
             try {
-                metaWindow.raise();
-            } catch (_e) { /* ignore */ }
-            Main.activateWindow(metaWindow);
+                activateWindowAfterRendered(actor, metaWindow);
+                Scratch.makeScratch(metaWindow);
+            } catch (e) {
+                console.warn('#PaperWM scratch insert failed:', e?.message ?? e);
+            }
             return;
         }
 
@@ -5820,11 +5822,73 @@ export function activateLastWindow(_mw, space) {
  * may be requried under certain use cases (such as activating a floating window
  * programmatically before it's rendered, see
  * https://github.com/paperwm/PaperWM/issues/448 for details).
+ *
+ * Crash-safety: the `show` one-shot below may fire *synchronously* (e.g.
+ * `makeScratch()` shows the actor on the same `first-frame` stack), so the
+ * callback only ever schedules IDLE work - it never raises/activates
+ * re-entrantly inside Mutter's map path (that segfaulted launcher overlays
+ * like Vicinae -> session crash -> logout). Activation itself runs on IDLE
+ * with liveness guards, plus one delayed retry for slow mappers; a closed
+ * or minimized window is silently skipped and no exception ever propagates
+ * back into Mutter. `Main.activateWindow()` raises within the above layer
+ * by itself, so no separate synchronous `raise()` is needed.
  */
 function activateWindowAfterRendered(actor, mw) {
-    callbackOnActorShow(actor, () => {
-        Main.activateWindow(mw);
-    });
+    if (!mw) {
+        return;
+    }
+    let done = false;
+    const tryFocus = () => {
+        if (done) {
+            return;
+        }
+        let liveActor = null;
+        try {
+            if (mw.minimized) {
+                done = true;
+                return;
+            }
+            try {
+                liveActor = mw.get_compositor_private();
+            } catch (_e) {
+                liveActor = null;
+            }
+            if (!liveActor || !liveActor.mapped) {
+                return; // gone or not mapped yet - leave `done` false for retry
+            }
+            try {
+                mw.raise();
+            } catch (_e) { /* ignore dead windows */ }
+            Main.activateWindow(mw);
+            done = true;
+        } catch (e) {
+            console.warn('#PaperWM scratch focus failed:', e?.message ?? e);
+            done = true;
+        }
+    };
+    const scheduleIdleFocus = () => {
+        try {
+            Utils.later_add(Meta.LaterType.IDLE, () => {
+                tryFocus();
+                // Slow mappers: one delayed retry, then give up silently.
+                if (!done) {
+                    try {
+                        GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
+                            tryFocus();
+                            return false;
+                        });
+                    } catch (_e) { /* ignore */ }
+                }
+            });
+        } catch (_e) { /* ignore - focus is best-effort */ }
+    };
+    try {
+        callbackOnActorShow(actor, () => {
+            scheduleIdleFocus();
+        });
+    } catch (_e) { /* ignore */ }
+    // Fallback: the actor may already be visible (one-shot never fires).
+    scheduleIdleFocus();
 }
 
 /**
