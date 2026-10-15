@@ -125,6 +125,17 @@ export function makeScratch(metaWindow) {
     if (!metaWindow.minimized)
         Tiling.showWindow(metaWindow);
 
+    // A newly-scratched window must stack above existing always-on-top
+    // windows: make_above() only sets the layer flag, it doesn't raise
+    // within it, so without this the window opens behind a focused
+    // always-on-top window and never receives focus (e.g. Vicinae).
+    // raise() only affects stacking, not focus; minimized windows stay hidden.
+    if (fromNonScratch && !metaWindow.minimized) {
+        try {
+            metaWindow.raise();
+        } catch (_e) { /* ignore dead windows */ }
+    }
+
     if (fromTiling) {
         let f = metaWindow.get_frame_rect();
         let targetFrame = null;

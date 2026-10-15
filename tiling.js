@@ -4655,8 +4655,19 @@ export function insertWindow(metaWindow, options = {}) {
 
         if (addToScratch) {
             connectSizeChanged();
-            Scratch.makeScratch(metaWindow);
+            // NB: connect BEFORE makeScratch(): it shows the actor
+            // synchronously, so connecting afterwards misses 'show' and the
+            // window never takes focus (seen when an always-on-top window
+            // holds focus and a new scratch window e.g. Vicinae opens).
             activateWindowAfterRendered(actor, metaWindow);
+            Scratch.makeScratch(metaWindow);
+            // The actor may already have been visible (one-shot above then
+            // never fires): raise above other always-on-top windows and
+            // take focus directly.
+            try {
+                metaWindow.raise();
+            } catch (_e) { /* ignore */ }
+            Main.activateWindow(metaWindow);
             return;
         }
 
