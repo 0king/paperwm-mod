@@ -557,15 +557,74 @@ class SettingsWidget {
     }
 
     /**
+     * Best-effort transient parent for file chooser dialogs.
+     * Never throws: returns a Gtk.Window or null.
+     */
+    _getDialogParent() {
+        try {
+            if (this.window instanceof Gtk.Window) {
+                return this.window;
+            }
+            const root = this.window?.get_root?.();
+            if (root instanceof Gtk.Window) {
+                return root;
+            }
+        } catch (e) {
+            console.warn(`Could not resolve dialog parent: ${e.message}`);
+        }
+        return null;
+    }
+
+    /**
+     * Default export filename: paperwm-mod-settings-<timestamp>.md
+     * Never throws: falls back to a non-timestamped name.
+     */
+    _getExportFilename() {
+        try {
+            const timestamp = GLib.DateTime.new_now_local()?.format('%Y%m%d-%H%M%S');
+            if (timestamp) {
+                return `paperwm-mod-settings-${timestamp}.md`;
+            }
+        } catch (e) {
+            console.warn(`Could not format timestamp: ${e.message}`);
+        }
+        return 'paperwm-mod-settings-backup.md';
+    }
+
+    /**
+     * Human-readable file description that works for native and remote files.
+     */
+    _describeFile(file) {
+        try {
+            return file.get_path() ?? file.get_uri() ?? 'selected file';
+        } catch (e) {
+            console.warn(`Could not describe file: ${e.message}`);
+            return 'selected file';
+        }
+    }
+
+    /**
      * Runs `dconf dump` for all PaperWM settings (main, keybindings, workspaces).
      * @returns String dconf dump contents
      */
     _dconfDump() {
-        const proc = Gio.Subprocess.new(
-            ['dconf', 'dump', '/org/gnome/shell/extensions/paperwm/'],
-            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE
-        );
-        const [ok, stdout, stderr] = proc.communicate_utf8(null, null);
+        let proc;
+        try {
+            proc = Gio.Subprocess.new(
+                ['dconf', 'dump', '/org/gnome/shell/extensions/paperwm/'],
+                Gio.SubprocessFlags.SEARCH_PATH |
+                    Gio.SubprocessFlags.STDOUT_PIPE |
+                    Gio.SubprocessFlags.STDERR_PIPE
+            );
+        } catch (e) {
+            throw new Error(`Could not start 'dconf dump' (is dconf installed?): ${e.message}`);
+        }
+        let ok, stdout, stderr;
+        try {
+            [ok, stdout, stderr] = proc.communicate_utf8(null, null);
+        } catch (e) {
+            throw new Error(`'dconf dump' communication failed: ${e.message}`);
+        }
         if (!ok || !proc.get_successful()) {
             throw new Error((stderr || '').trim() || 'dconf dump failed');
         }
@@ -579,76 +638,154 @@ class SettingsWidget {
      * Loads dconf dump contents into PaperWM settings.
      */
     _dconfLoad(contents) {
-        const proc = Gio.Subprocess.new(
-            ['dconf', 'load', '/org/gnome/shell/extensions/paperwm/'],
-            Gio.SubprocessFlags.STDIN_PIPE |
-                Gio.SubprocessFlags.STDOUT_PIPE |
-                Gio.SubprocessFlags.STDERR_PIPE
-        );
-        const [ok, , stderr] = proc.communicate_utf8(contents, null);
+        if (typeof contents !== 'string' || !contents.trim()) {
+            throw new Error('Nothing to import (backup file was empty)');
+        }
+        let proc;
+        try {
+            proc = Gio.Subprocess.new(
+                ['dconf', 'load', '/org/gnome/shell/extensions/paperwm/'],
+                Gio.SubprocessFlags.SEARCH_PATH |
+                    Gio.SubprocessFlags.STDIN_PIPE |
+                    Gio.SubprocessFlags.STDOUT_PIPE |
+                    Gio.SubprocessFlags.STDERR_PIPE
+            );
+        } catch (e) {
+            throw new Error(`Could not start 'dconf load' (is dconf installed?): ${e.message}`);
+        }
+        let ok, stderr;
+        try {
+            [ok, , stderr] = proc.communicate_utf8(contents, null);
+        } catch (e) {
+            throw new Error(`'dconf load' communication failed: ${e.message}`);
+        }
         if (!ok || !proc.get_successful()) {
             throw new Error((stderr || '').trim() || 'dconf load failed');
         }
     }
 
     /**
-     * Exports user settings to a backup file (defaults to Desktop).
+     * Exports user settings to a backup file.
+     * Opens a file picker so the user can choose the destination path;
+     * suggests paperwm-mod-settings-<timestamp>.md in the Desktop folder.
      */
     _exportSettings() {
-        const chooser = new Gtk.FileChooserDialog({
-            action: Gtk.FileChooserAction.SAVE,
-            title: 'Export PaperWM Settings',
-            modal: true,
-            transient_for: this.window.get_root(),
-            select_multiple: false,
-        });
+        let chooser;
+        try {
+            chooser = new Gtk.FileChooserDialog({
+                action: Gtk.FileChooserAction.SAVE,
+                title: 'Export PaperWM Settings',
+                modal: true,
+            });
+            const parent = this._getDialogParent();
+            if (parent) {
+                try {
+                    chooser.set_transient_for(parent);
+                } catch (e) {
+                    console.warn(`Could not set dialog parent: ${e.message}`);
+                }
+            }
+        } catch (e) {
+            console.error(e);
+            this._setBackupStatus(`Export failed: could not open file picker: ${e.message}`, true);
+            return;
+        }
         chooser.add_button('Cancel', Gtk.ResponseType.CANCEL);
         chooser.add_button('Save', Gtk.ResponseType.OK);
-        chooser.set_do_overwrite_confirmation(true);
+        try {
+            chooser.set_do_overwrite_confirmation(true);
+        } catch (e) {
+            console.warn(`Could not enable overwrite confirmation: ${e.message}`);
+        }
         try {
             chooser.set_current_folder(Gio.File.new_for_path(this._getDesktopPath()));
         } catch (e) {
             console.warn(`Could not set default backup folder: ${e.message}`);
         }
-        const timestamp = GLib.DateTime.new_now_local().format('%Y%m%d-%H%M%S');
-        chooser.set_current_name(`paperwm-mod-settings-${timestamp}.ini`);
+        try {
+            chooser.set_current_name(this._getExportFilename());
+        } catch (e) {
+            console.warn(`Could not set default backup filename: ${e.message}`);
+        }
         chooser.connect('response', (dialog, response) => {
-            if (response === Gtk.ResponseType.OK) {
-                try {
-                    const file = chooser.get_file();
+            try {
+                if (response === Gtk.ResponseType.OK) {
+                    let file = null;
+                    try {
+                        file = chooser.get_file();
+                    } catch (e) {
+                        throw new Error(`Could not resolve selected file: ${e.message}`);
+                    }
                     if (!file) {
                         throw new Error('No file selected');
                     }
                     const dump = this._dconfDump();
-                    file.replace_contents(
-                        new TextEncoder().encode(dump),
-                        null,
-                        false,
-                        Gio.FileCreateFlags.REPLACE_DESTINATION,
-                        null
-                    );
-                    this._setBackupStatus(`Settings exported to ${file.get_path()}`);
+                    let wrote;
+                    try {
+                        [wrote] = file.replace_contents(
+                            new TextEncoder().encode(dump),
+                            null,
+                            false,
+                            Gio.FileCreateFlags.REPLACE_DESTINATION,
+                            null
+                        );
+                    } catch (e) {
+                        throw new Error(`Could not write ${this._describeFile(file)}: ${e.message}`);
+                    }
+                    if (!wrote) {
+                        throw new Error(`Could not write ${this._describeFile(file)}`);
+                    }
+                    this._setBackupStatus(`Settings exported to ${this._describeFile(file)}`);
+                }
+            } catch (e) {
+                console.error(e);
+                this._setBackupStatus(`Export failed: ${e.message}`, true);
+            } finally {
+                try {
+                    chooser.destroy();
                 } catch (e) {
-                    console.error(e);
-                    this._setBackupStatus(`Export failed: ${e.message}`, true);
+                    console.warn(`Could not close file picker: ${e.message}`);
                 }
             }
-            chooser.destroy();
         });
-        chooser.show();
+        try {
+            chooser.show();
+        } catch (e) {
+            console.error(e);
+            this._setBackupStatus(`Export failed: could not show file picker: ${e.message}`, true);
+            try {
+                chooser.destroy();
+            } catch (destroyError) {
+                console.warn(`Could not close file picker: ${destroyError.message}`);
+            }
+        }
     }
 
     /**
      * Imports user settings from a backup file (defaults to Desktop).
+     * Accepts current .md backups as well as legacy .ini backups.
      */
     _importSettings() {
-        const chooser = new Gtk.FileChooserDialog({
-            action: Gtk.FileChooserAction.OPEN,
-            title: 'Import PaperWM Settings',
-            modal: true,
-            transient_for: this.window.get_root(),
-            select_multiple: false,
-        });
+        let chooser;
+        try {
+            chooser = new Gtk.FileChooserDialog({
+                action: Gtk.FileChooserAction.OPEN,
+                title: 'Import PaperWM Settings',
+                modal: true,
+            });
+            const parent = this._getDialogParent();
+            if (parent) {
+                try {
+                    chooser.set_transient_for(parent);
+                } catch (e) {
+                    console.warn(`Could not set dialog parent: ${e.message}`);
+                }
+            }
+        } catch (e) {
+            console.error(e);
+            this._setBackupStatus(`Import failed: could not open file picker: ${e.message}`, true);
+            return;
+        }
         chooser.add_button('Cancel', Gtk.ResponseType.CANCEL);
         chooser.add_button('Open', Gtk.ResponseType.OK);
         try {
@@ -657,7 +794,8 @@ class SettingsWidget {
             console.warn(`Could not set default backup folder: ${e.message}`);
         }
         const backupFilter = new Gtk.FileFilter();
-        backupFilter.set_name('Settings backup (*.ini)');
+        backupFilter.set_name('Settings backup (*.md, *.ini)');
+        backupFilter.add_pattern('*.md');
         backupFilter.add_pattern('*.ini');
         chooser.add_filter(backupFilter);
         const allFilter = new Gtk.FileFilter();
@@ -665,29 +803,63 @@ class SettingsWidget {
         allFilter.add_pattern('*');
         chooser.add_filter(allFilter);
         chooser.connect('response', (dialog, response) => {
-            if (response === Gtk.ResponseType.OK) {
-                try {
-                    const file = chooser.get_file();
+            try {
+                if (response === Gtk.ResponseType.OK) {
+                    let file = null;
+                    try {
+                        file = chooser.get_file();
+                    } catch (e) {
+                        throw new Error(`Could not resolve selected file: ${e.message}`);
+                    }
                     if (!file) {
                         throw new Error('No file selected');
                     }
-                    const [, contents] = file.load_contents(null);
-                    const text = new TextDecoder('utf-8').decode(contents);
+                    let loadedOk = false;
+                    let contents = null;
+                    try {
+                        [loadedOk, contents] = file.load_contents(null);
+                    } catch (e) {
+                        throw new Error(`Could not read ${this._describeFile(file)}: ${e.message}`);
+                    }
+                    if (!loadedOk || !contents) {
+                        throw new Error(`Could not read ${this._describeFile(file)}`);
+                    }
+                    let text;
+                    try {
+                        text = new TextDecoder('utf-8', { fatal: true }).decode(contents);
+                    } catch (e) {
+                        throw new Error('Backup file is not valid UTF-8 text');
+                    }
                     if (!text.trim() || !text.includes('[') || !text.includes('=')) {
                         throw new Error('File does not look like a PaperWM settings backup');
                     }
                     this._dconfLoad(text);
                     this._setBackupStatus(
-                        `Settings imported from ${file.get_path()}. Close and reopen Settings to see all changes.`
+                        `Settings imported from ${this._describeFile(file)}. Close and reopen Settings to see all changes.`
                     );
+                }
+            } catch (e) {
+                console.error(e);
+                this._setBackupStatus(`Import failed: ${e.message}`, true);
+            } finally {
+                try {
+                    chooser.destroy();
                 } catch (e) {
-                    console.error(e);
-                    this._setBackupStatus(`Import failed: ${e.message}`, true);
+                    console.warn(`Could not close file picker: ${e.message}`);
                 }
             }
-            chooser.destroy();
         });
-        chooser.show();
+        try {
+            chooser.show();
+        } catch (e) {
+            console.error(e);
+            this._setBackupStatus(`Import failed: could not show file picker: ${e.message}`, true);
+            try {
+                chooser.destroy();
+            } catch (destroyError) {
+                console.warn(`Could not close file picker: ${destroyError.message}`);
+            }
+        }
     }
 
     /**
