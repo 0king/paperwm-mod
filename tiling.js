@@ -1324,6 +1324,16 @@ export class Space extends Array {
         if (actor)
             actor.remove_clip();
 
+        // Drop the removed window's rank so a live-but-untiled window
+        // (e.g. moved to another Space, stuck to scratch) can never keep
+        // a stale rank colliding with the remaining tiled ranks. The
+        // layout() below re-stamps the survivors contiguously.
+        try {
+            if (metaWindow && '_dtpPosition' in metaWindow) {
+                delete metaWindow._dtpPosition;
+            }
+        } catch (_e) { /* ignore dead windows */ }
+
         this.layout();
         if (this.selectedWindow) {
             ensureViewport(this.selectedWindow, this);
@@ -4729,6 +4739,12 @@ export function insertWindow(metaWindow, options = {}) {
             } catch (e) {
                 console.warn('#PaperWM scratch insert failed:', e?.message ?? e);
             }
+            // The provisional stamp shifted tiled ranks to make room, but
+            // this window never joins a Space: re-sync the survivors back
+            // to contiguous ranks (no-op unless the setting is on).
+            try {
+                syncTaskbarOrder();
+            } catch (_e) { /* best-effort */ }
             return;
         }
 
@@ -4757,10 +4773,18 @@ export function insertWindow(metaWindow, options = {}) {
         connectSizeChanged();
         showWindow(metaWindow);
         clearTaskbarPosition(metaWindow);
+        // Provisional stamp (if any) shifted tiled ranks: restore
+        // contiguity for the survivors. No-op unless the setting is on.
+        try {
+            syncTaskbarOrder();
+        } catch (_e) { /* best-effort */ }
         return;
     } else if (Scratch.isScratchWindow(metaWindow)) {
         // And make sure scratch windows are stuck
         Scratch.makeScratch(metaWindow);
+        try {
+            syncTaskbarOrder();
+        } catch (_e) { /* best-effort */ }
         return;
     }
 
@@ -6692,22 +6716,90 @@ export function syncTaskbarOrder() {
         return;
     }
     try {
-        let orderedSpaces = [...spaces.values()]
-            .sort((a, b) => a.workspace.index() - b.workspace.index());
+        let orderedSpaces;
+        try {
+            orderedSpaces = [...spaces.values()];
+        } catch (_e) {
+            return; // spaces torn down mid-call; nothing to stamp
+        }
+        // Defensive sort: a single dead workspace must never abort the
+        // whole sync (that would leave every window with stale ranks).
+        try {
+            orderedSpaces.sort((a, b) => {
+                let ai = 0, bi = 0;
+                try {
+                    ai = a?.workspace?.index?.() ?? 0;
+                } catch (_e) { ai = 0; }
+                try {
+                    bi = b?.workspace?.index?.() ?? 0;
+                } catch (_e) { bi = 0; }
+                // Guard against NaN/non-numeric indices.
+                if (!Number.isFinite(ai)) {
+                    ai = 0;
+                }
+                if (!Number.isFinite(bi)) {
+                    bi = 0;
+                }
+                return ai - bi;
+            });
+        } catch (_e) { /* keep insertion order on sort failure */ }
         let pos = 0;
         let signature = [];
         for (let space of orderedSpaces) {
-            for (let w of space.getWindows()) {
-                try {
-                    w._dtpPosition = pos++;
-                    signature.push(w.get_stable_sequence());
-                } catch (_e) { /* ignore dead windows */ }
+            if (!space) {
+                continue;
             }
-            for (let w of space._floating) {
+            let tiled = [];
+            let floating = [];
+            try {
+                tiled = space.getWindows?.() ?? [];
+            } catch (_e) {
+                tiled = []; // one bad space must not hide others
+            }
+            try {
+                floating = space._floating ?? [];
+            } catch (_e) {
+                floating = [];
+            }
+            // Stamping and signature collection are isolated per window:
+            // a throwing get_stable_sequence() must not skip the stamp,
+            // and must not blind the nudge gate (fallback id keeps the
+            // signature sensitive to membership/order changes).
+            for (let w of tiled) {
+                if (!w) {
+                    continue;
+                }
                 try {
-                    w._dtpPosition = pos++;
-                    signature.push(w.get_stable_sequence());
+                    w._dtpPosition = pos;
                 } catch (_e) { /* ignore dead windows */ }
+                try {
+                    signature.push(w.get_stable_sequence());
+                } catch (_e) {
+                    try {
+                        signature.push(`id:${w.get_id?.() ?? pos}`);
+                    } catch (_e2) {
+                        signature.push(`pos:${pos}`);
+                    }
+                }
+                pos++;
+            }
+            for (let w of floating) {
+                if (!w) {
+                    continue;
+                }
+                try {
+                    w._dtpPosition = pos;
+                } catch (_e) { /* ignore dead windows */ }
+                try {
+                    signature.push(w.get_stable_sequence());
+                } catch (_e) {
+                    try {
+                        signature.push(`id:${w.get_id?.() ?? pos}`);
+                    } catch (_e2) {
+                        signature.push(`pos:${pos}`);
+                    }
+                }
+                pos++;
             }
         }
         nudgeTaskbarOrder(signature.join(','));
@@ -6732,28 +6824,93 @@ export function stampProvisionalTaskbarPosition(metaWindow) {
         return;
     }
     try {
-        if (metaWindow.is_on_all_workspaces()) {
-            return; // never tiled into a Space; leave native sorting
+        try {
+            if (metaWindow.is_on_all_workspaces?.()) {
+                return; // never tiled into a Space; leave native sorting
+            }
+        } catch (_e) {
+            return; // dead window; nothing to stamp
         }
-        let targetSpace = spaces.selectedSpace;
+        let targetSpace = null;
+        try {
+            targetSpace = spaces.selectedSpace;
+        } catch (_e) {
+            targetSpace = null;
+        }
         if (!targetSpace) {
             return;
         }
-        let insertIndex = getOpenWindowPositionIndex(targetSpace);
+        let insertIndex = 0;
+        try {
+            insertIndex = getOpenWindowPositionIndex(targetSpace);
+        } catch (_e) {
+            insertIndex = targetSpace.length ?? 0;
+        }
+        if (!Number.isFinite(insertIndex) || insertIndex < 0) {
+            insertIndex = 0;
+        }
+        let orderedSpaces;
+        try {
+            orderedSpaces = [...spaces.values()];
+        } catch (_e) {
+            return;
+        }
+        try {
+            orderedSpaces.sort((a, b) => {
+                let ai = 0, bi = 0;
+                try {
+                    ai = a?.workspace?.index?.() ?? 0;
+                } catch (_e) { ai = 0; }
+                try {
+                    bi = b?.workspace?.index?.() ?? 0;
+                } catch (_e) { bi = 0; }
+                if (!Number.isFinite(ai)) {
+                    ai = 0;
+                }
+                if (!Number.isFinite(bi)) {
+                    bi = 0;
+                }
+                return ai - bi;
+            });
+        } catch (_e) { /* keep insertion order */ }
         let pos = 0;
-        let orderedSpaces = [...spaces.values()]
-            .sort((a, b) => a.workspace.index() - b.workspace.index());
         for (let space of orderedSpaces) {
+            if (!space) {
+                continue;
+            }
             if (space === targetSpace) {
                 // flat position of the insertion column = tiled windows in
                 // preceding columns (exact for column inserts; approximate
                 // for DOWN/UP stacks, which slurp post-insert)
                 let flat = 0;
-                for (let i = 0; i < Math.min(insertIndex, space.length); i++) {
-                    flat += space[i].length;
+                try {
+                    let cols = Math.min(insertIndex, space.length ?? 0);
+                    for (let i = 0; i < cols; i++) {
+                        try {
+                            flat += space[i]?.length ?? 0;
+                        } catch (_e) { /* ignore ragged columns */ }
+                    }
+                } catch (_e) {
+                    flat = 0;
                 }
-                let windows = space.getWindows();
+                if (!Number.isFinite(flat) || flat < 0) {
+                    flat = 0;
+                }
+                let windows = [];
+                try {
+                    windows = space.getWindows?.() ?? [];
+                } catch (_e) {
+                    windows = [];
+                }
+                // Clamp: a stale insertIndex must never push the newcomer
+                // past the end (that would leave a trailing gap).
+                if (flat > windows.length) {
+                    flat = windows.length;
+                }
                 for (let i = 0; i < windows.length; i++) {
+                    if (!windows[i]) {
+                        continue;
+                    }
                     try {
                         windows[i]._dtpPosition = pos + (i < flat ? i : i + 1);
                     } catch (_e) { /* ignore dead windows */ }
@@ -6762,18 +6919,45 @@ export function stampProvisionalTaskbarPosition(metaWindow) {
                     metaWindow._dtpPosition = pos + flat;
                 } catch (_e) { /* ignore */ }
                 pos += windows.length + 1;
-                for (let w of space._floating) {
+                let floating = [];
+                try {
+                    floating = space._floating ?? [];
+                } catch (_e) {
+                    floating = [];
+                }
+                for (let w of floating) {
+                    if (!w) {
+                        continue;
+                    }
                     try {
                         w._dtpPosition = pos++;
                     } catch (_e) { /* ignore dead windows */ }
                 }
             } else {
-                for (let w of space.getWindows()) {
+                let windows = [];
+                try {
+                    windows = space.getWindows?.() ?? [];
+                } catch (_e) {
+                    windows = [];
+                }
+                for (let w of windows) {
+                    if (!w) {
+                        continue;
+                    }
                     try {
                         w._dtpPosition = pos++;
                     } catch (_e) { /* ignore dead windows */ }
                 }
-                for (let w of space._floating) {
+                let floating = [];
+                try {
+                    floating = space._floating ?? [];
+                } catch (_e) {
+                    floating = [];
+                }
+                for (let w of floating) {
+                    if (!w) {
+                        continue;
+                    }
                     try {
                         w._dtpPosition = pos++;
                     } catch (_e) { /* ignore dead windows */ }
@@ -6827,15 +7011,32 @@ export function clearTaskbarPosition(metaWindow) {
 /**
  * Remove the `_dtpPosition` overrides set by `syncTaskbarOrder()`,
  * restoring Dash-to-Panel's native creation-order sorting.
+ *
+ * Besides the tiled+floating windows in every Space, this sweeps the
+ * global window list for stale provisional ranks (scratch/sticky/
+ * redirected windows that never joined a Space). Without the sweep a
+ * leftover rank keeps colliding with tiled ranks after disable/setting-off.
  */
 export function clearTaskbarOrder() {
+    lastTaskbarSignature = null;
     if (!spaces) {
         return;
     }
-    lastTaskbarSignature = null;
     try {
         for (let space of spaces.values()) {
-            for (let w of [...space.getWindows(), ...space._floating]) {
+            if (!space) {
+                continue;
+            }
+            let stamped = [];
+            try {
+                stamped = [...(space.getWindows?.() ?? []), ...(space._floating ?? [])];
+            } catch (_e) {
+                continue; // one bad space must not block the sweep
+            }
+            for (let w of stamped) {
+                if (!w) {
+                    continue;
+                }
                 try {
                     if ('_dtpPosition' in w) {
                         delete w._dtpPosition;
@@ -6845,6 +7046,42 @@ export function clearTaskbarOrder() {
         }
     } catch (e) {
         console.error('PaperWM: clearTaskbarOrder failed', e);
+    }
+    // Sweep any window that never entered a Space (provisional stamps on
+    // scratch/sticky/redirected windows). Best-effort: any of these
+    // accessors may be unavailable during teardown.
+    try {
+        let all = [];
+        try {
+            if (typeof global !== 'undefined' && global?.get_window_actors) {
+                all = global.get_window_actors().map(a => {
+                    try {
+                        return a?.meta_window ?? a?.get_meta_window?.();
+                    } catch (_e) {
+                        return null;
+                    }
+                }).filter(Boolean);
+            }
+        } catch (_e) { /* ignore */ }
+        if (!all.length) {
+            try {
+                all = display?.get_tab_list?.(Meta.TabList.NORMAL_ALL, null) ?? [];
+            } catch (_e) {
+                all = [];
+            }
+        }
+        for (let w of all) {
+            if (!w) {
+                continue;
+            }
+            try {
+                if ('_dtpPosition' in w) {
+                    delete w._dtpPosition;
+                }
+            } catch (_e) { /* ignore dead windows */ }
+        }
+    } catch (e) {
+        console.error('PaperWM: clearTaskbarOrder sweep failed', e);
     }
 }
 

@@ -118,9 +118,15 @@ export function makeScratch(metaWindow) {
 
     // Stuck windows are in no Space: drop any taskbar-order rank so it
     // can't collide with tiled windows' ranks (Dash-to-Panel sorts by it).
+    // Re-sync survivors to contiguous ranks: a provisional stamp may have
+    // shifted them to make room for this window (which never tiles).
+    // Both are no-ops unless sync-taskbar-order is on; never throw.
     try {
         Tiling.clearTaskbarPosition?.(metaWindow);
     } catch (_e) { /* ignore */ }
+    try {
+        Tiling.syncTaskbarOrder?.();
+    } catch (_e) { /* best-effort */ }
 
     if (!metaWindow.minimized)
         Tiling.showWindow(metaWindow);
