@@ -369,6 +369,30 @@ export function enable(extension) {
         // Apply Dash-to-Panel order override if the setting is on
         // (layouts during init already sync, this covers restored sessions).
         syncTaskbarOrder();
+
+        // Startup race cover: autostart windows (e.g. two Brave profiles +
+        // Obsidian via xdg-open) arrive in a burst around startup-complete
+        // while taskbars may still be enabling or may have painted an early
+        // snapshot. The signature gate would then suppress a re-nudge (order
+        // unchanged since the synchronous sync above), leaving a panel that
+        // painted early or missed the nudge stale - e.g. a late vault window
+        // missing. Re-assert once settled with a forced nudge; no-ops
+        // unless the setting is on and never throws.
+        try {
+            Utils.later_add(Meta.LaterType.IDLE, () => {
+                try {
+                    forceTaskbarResync();
+                } catch (_e) { /* best-effort */ }
+                try {
+                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+                        try {
+                            forceTaskbarResync();
+                        } catch (_e) { /* best-effort */ }
+                        return false;
+                    });
+                } catch (_e) { /* ignore */ }
+            });
+        } catch (_e) { /* ignore - synchronous sync above already ran */ }
     };
 
     if (Main.layoutManager._startingUp) {
@@ -4741,9 +4765,11 @@ export function insertWindow(metaWindow, options = {}) {
             }
             // The provisional stamp shifted tiled ranks to make room, but
             // this window never joins a Space: re-sync the survivors back
-            // to contiguous ranks (no-op unless the setting is on).
+            // to contiguous ranks, forcing the nudge (the signature is
+            // unchanged, but a panel may have painted the provisional that
+            // included this window). No-op unless the setting is on.
             try {
-                syncTaskbarOrder();
+                forceTaskbarResync();
             } catch (_e) { /* best-effort */ }
             return;
         }
@@ -4774,16 +4800,17 @@ export function insertWindow(metaWindow, options = {}) {
         showWindow(metaWindow);
         clearTaskbarPosition(metaWindow);
         // Provisional stamp (if any) shifted tiled ranks: restore
-        // contiguity for the survivors. No-op unless the setting is on.
+        // contiguity for the survivors, forcing the nudge (same rationale
+        // as above). No-op unless the setting is on.
         try {
-            syncTaskbarOrder();
+            forceTaskbarResync();
         } catch (_e) { /* best-effort */ }
         return;
     } else if (Scratch.isScratchWindow(metaWindow)) {
         // And make sure scratch windows are stuck
         Scratch.makeScratch(metaWindow);
         try {
-            syncTaskbarOrder();
+            forceTaskbarResync();
         } catch (_e) { /* best-effort */ }
         return;
     }
@@ -6993,6 +7020,23 @@ function nudgeTaskbarOrder(signature) {
     } catch (e) {
         console.error('PaperWM: nudgeTaskbarOrder failed', e);
     }
+}
+
+/**
+ * Re-assert taskbar order even when the signature gate would suppress the
+ * nudge (same order as last push). Needed when the panel's *view* may be
+ * stale while our signature is unchanged: a panel that painted before our
+ * stamps landed, missed the nudge while still enabling, or sorted a
+ * transient state (e.g. autostart burst at login). Also used after removing
+ * a window from the stamped set whose absence leaves the signature
+ * unchanged (never-tiled scratch/sticky provisionals). No-op unless the
+ * setting is on; never throws.
+ */
+export function forceTaskbarResync() {
+    lastTaskbarSignature = null;
+    try {
+        syncTaskbarOrder();
+    } catch (_e) { /* best-effort: sync logs its own failures */ }
 }
 
 /**
