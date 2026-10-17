@@ -77,9 +77,13 @@ export function makeScratch(metaWindow) {
         }
         fromTiling = !!owningSpace && owningSpace.indexOf(metaWindow) > -1;
         if (fromTiling) {
-            windowPositionSeen = metaWindow.clone
-                .get_transformed_position()
-                .map(Math.round);
+            try {
+                windowPositionSeen = metaWindow.clone
+                    .get_transformed_position()
+                    .map(Math.round);
+            } catch (_e) {
+                windowPositionSeen = undefined;
+            }
         }
     }
 
@@ -129,8 +133,13 @@ export function makeScratch(metaWindow) {
         Tiling.forceTaskbarResync?.();
     } catch (_e) { /* best-effort */ }
 
-    if (!metaWindow.minimized)
-        Tiling.showWindow(metaWindow);
+    if (!metaWindow.minimized) {
+        try {
+            Tiling.showWindow(metaWindow);
+        } catch (_e) {
+            console.warn('#PaperWM makeScratch showWindow failed:', _e?.message ?? _e);
+        }
+    }
 
     // NOTE: no synchronous raise()/activate here. makeScratch() runs on the
     // `first-frame` stack for new windows (via insertWindow) and shows the
@@ -142,54 +151,60 @@ export function makeScratch(metaWindow) {
     // Activation raises within the above layer by itself.
 
     if (fromTiling) {
-        let f = metaWindow.get_frame_rect();
-        let targetFrame = null;
+        try {
+            let f = metaWindow.get_frame_rect();
+            let targetFrame = null;
 
-        if (metaWindow[scratchFrame]) {
-            let sf = metaWindow[scratchFrame];
-            if (Utils.monitorOfPoint(sf.x, sf.y) === Tiling.focusMonitor()) {
-                targetFrame = sf;
+            if (metaWindow[scratchFrame]) {
+                let sf = metaWindow[scratchFrame];
+                if (Utils.monitorOfPoint(sf.x, sf.y) === Tiling.focusMonitor()) {
+                    targetFrame = sf;
+                }
             }
-        }
 
-        if (!targetFrame) {
-            // Default to moving the window slightly down and reducing the height
-            let vDisplacement = 30;
-            let [x, y] = windowPositionSeen;  // The window could be non-placable so can't use frame
+            if (!targetFrame) {
+                // Default to moving the window slightly down and reducing the height
+                let vDisplacement = 30;
+                let [x, y] = windowPositionSeen;  // The window could be non-placable so can't use frame
 
-            targetFrame = new Mtk.Rectangle({
-                x, y: y + vDisplacement,
-                width: f.width,
-                height: Math.min(f.height - vDisplacement, Math.floor(f.height * 0.9)),
-            });
-        }
-
-        if (!metaWindow.minimized) {
-            metaWindow.move_resize_frame(true, f.x, f.y,
-                targetFrame.width, targetFrame.height);
-            easeScratch(
-                metaWindow,
-                targetFrame.x,
-                targetFrame.y,
-                {
-                    onComplete: () => {
-                        delete metaWindow[scratchFrame];
-                        Main.activateWindow(metaWindow);
-                    },
+                targetFrame = new Mtk.Rectangle({
+                    x, y: y + vDisplacement,
+                    width: f.width,
+                    height: Math.min(f.height - vDisplacement, Math.floor(f.height * 0.9)),
                 });
-        } else {
-            // Can't restore the scratch geometry immediately since it distort the minimize animation
-            // ASSUMPTION: minimize animation is not disabled and not already done
-            let actor = metaWindow.get_compositor_private();
-            let signal = actor.connect('effects-completed', () => {
-                metaWindow.move_resize_frame(true, targetFrame.x, targetFrame.y,
+            }
+
+            if (!metaWindow.minimized) {
+                metaWindow.move_resize_frame(true, f.x, f.y,
                     targetFrame.width, targetFrame.height);
-                actor.disconnect(signal);
-            });
+                easeScratch(
+                    metaWindow,
+                    targetFrame.x,
+                    targetFrame.y,
+                    {
+                        onComplete: () => {
+                            delete metaWindow[scratchFrame];
+                            Main.activateWindow(metaWindow);
+                        },
+                    });
+            } else {
+                // Can't restore the scratch geometry immediately since it distort the minimize animation
+                // ASSUMPTION: minimize animation is not disabled and not already done
+                let actor = metaWindow.get_compositor_private();
+                let signal = actor.connect('effects-completed', () => {
+                    metaWindow.move_resize_frame(true, targetFrame.x, targetFrame.y,
+                        targetFrame.width, targetFrame.height);
+                    actor.disconnect(signal);
+                });
+            }
+        } catch (_e) {
+            console.warn('#PaperWM makeScratch fromTiling layout failed:', _e?.message ?? _e);
         }
     }
 
-    Tiling.focusMonitor()?.clickOverlay?.hide();
+    try {
+        Tiling.focusMonitor()?.clickOverlay?.hide();
+    } catch (_e) { /* ignore */ }
 }
 
 export function unmakeScratch(metaWindow) {
@@ -216,16 +231,18 @@ export function unmakeScratch(metaWindow) {
 }
 
 export function toggle(metaWindow) {
-    if (isScratchWindow(metaWindow)) {
-        unmakeScratch(metaWindow);
-    } else {
-        makeScratch(metaWindow);
+    try {
+        if (isScratchWindow(metaWindow)) {
+            unmakeScratch(metaWindow);
+        } else {
+            makeScratch(metaWindow);
 
-        if (metaWindow.has_focus) {
-            let space = Tiling.spaces.activeSpace;
-            space.setSelectionInactive();
+            if (metaWindow.has_focus) {
+                let space = Tiling.spaces.activeSpace;
+                space?.setSelectionInactive?.();
+            }
         }
-    }
+    } catch (_e) { /* ignore */ }
 }
 
 export function isScratchWindow(metaWindow) {
@@ -243,65 +260,110 @@ export function isScratchActive() {
 }
 
 export function toggleScratch() {
-    if (isScratchActive())
-        hide();
-    else
-        show();
+    try {
+        if (isScratchActive())
+            hide();
+        else
+            show();
+    } catch (_e) { /* ignore */ }
 }
 
 export function toggleScratchWindow() {
-    let focus = global.display.focus_window;
-    if (isScratchWindow(focus))
-        hide();
-    else
-        show(true);
+    try {
+        let focus = global.display.focus_window;
+        if (isScratchWindow(focus))
+            hide();
+        else
+            show(true);
+    } catch (_e) { /* ignore */ }
 }
 
 export function show(top) {
-    let windows = getScratchWindows();
+    let windows;
+    try {
+        windows = getScratchWindows();
+    } catch (_e) {
+        return;
+    }
     if (windows.length === 0) {
         return;
     }
     if (top)
         windows = windows.slice(0, 1);
 
-    Topbar.fixTopBar();
+    try {
+        Topbar.fixTopBar();
+    } catch (_e) { /* ignore - topbar best-effort */ }
 
-    windows.slice().reverse()
-        .map(function(meta_window) {
+    // Reveal each scratch window independently: one failing window must not
+    // abort the rest (robust against a dead/disposed actor).
+    windows.slice().reverse().forEach(function(meta_window) {
+        try {
             meta_window.unminimize();
             meta_window.make_above();
             meta_window.get_compositor_private().show();
-        });
-    windows[0].activate(global.get_current_time());
+        } catch (_e) {
+            console.warn('#PaperWM show scratch window failed:', _e?.message ?? _e);
+        }
+    });
 
-    let monitor = Tiling.focusMonitor();
-    monitor.clickOverlay?.hide();
+    try {
+        windows[0].activate(global.get_current_time());
+    } catch (_e) { /* ignore */ }
+
+    try {
+        let monitor = Tiling.focusMonitor();
+        monitor.clickOverlay?.hide();
+    } catch (_e) { /* ignore */ }
 }
 
 export function hide() {
-    let windows = getScratchWindows();
-    windows.map(function(meta_window) {
-        meta_window.minimize();
+    let windows;
+    try {
+        windows = getScratchWindows();
+    } catch (_e) {
+        return;
+    }
+    windows.forEach(function(meta_window) {
+        try {
+            meta_window.minimize();
+        } catch (_e) { /* ignore dead window */ }
     });
 }
 
 export function animateWindows() {
-    let ws = getScratchWindows().filter(w => !w.minimized);
-    ws = global.display.sort_windows_by_stacking(ws);
+    let ws;
+    try {
+        ws = getScratchWindows().filter(w => !w.minimized);
+        ws = global.display.sort_windows_by_stacking(ws);
+    } catch (_e) {
+        return;
+    }
     for (let w of ws) {
-        // let parent = w.clone.get_parent();
-        // parent && parent.remove_child(w.clone);
-        Utils.actor_remove_parent(w.clone);
-
-        Main.uiGroup.insert_child_above(w.clone, global.window_group);
-        let f = w.get_frame_rect();
-        w.clone.set_position(f.x, f.y);
-        Tiling.animateWindow(w);
+        try {
+            if (!w.clone)
+                continue;
+            Utils.actor_remove_parent(w.clone);
+            Main.uiGroup.insert_child_above(w.clone, global.window_group);
+            let f = w.get_frame_rect();
+            w.clone.set_position(f.x, f.y);
+            Tiling.animateWindow(w);
+        } catch (_e) {
+            console.warn('#PaperWM animate scratch window failed:', _e?.message ?? _e);
+        }
     }
 }
 
 export function showWindows() {
-    let ws = getScratchWindows().filter(w => !w.minimized);
-    ws.forEach(Tiling.showWindow);
+    let ws;
+    try {
+        ws = getScratchWindows().filter(w => !w.minimized);
+    } catch (_e) {
+        return;
+    }
+    ws.forEach(function(w) {
+        try {
+            Tiling.showWindow(w);
+        } catch (_e) { /* ignore */ }
+    });
 }
