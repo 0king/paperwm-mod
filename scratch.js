@@ -122,15 +122,18 @@ export function makeScratch(metaWindow) {
 
     // Stuck windows are in no Space: drop any taskbar-order rank so it
     // can't collide with tiled windows' ranks (Dash-to-Panel sorts by it).
-    // Re-sync survivors to contiguous ranks, forcing the nudge: a
-    // provisional stamp may have shifted them to make room for this window
-    // (which never tiles), and a panel may have painted that provisional.
-    // Both are no-ops unless sync-taskbar-order is on; never throw.
+    // Schedule a (gated) order re-check so survivors keep contiguous ranks;
+    // a panel is only re-sorted when the stamped order actually changed.
+    // Never *forced* from here: a scratch window that was never tiled leaves
+    // the order untouched, and forcing a nudge on every scratch open emitted
+    // shell-wide synchronous work that stalled the main thread for seconds
+    // (bugs/bugs.md §1.1). Both are no-ops unless sync-taskbar-order is on;
+    // never throw.
     try {
         Tiling.clearTaskbarPosition?.(metaWindow);
     } catch (_e) { /* ignore */ }
     try {
-        Tiling.forceTaskbarResync?.();
+        Tiling.scheduleTaskbarSync?.();
     } catch (_e) { /* best-effort */ }
 
     if (!metaWindow.minimized) {

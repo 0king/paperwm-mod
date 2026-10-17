@@ -7,7 +7,6 @@ import Meta from 'gi://Meta';
 import St from 'gi://St';
 
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
-import * as AppFavorites from 'resource:///org/gnome/shell/ui/appFavorites.js';
 
 import {
     Settings, Utils, Lib, Gestures, Navigator, Grab, Topbar, Scratch, Stackoverlay, Background
@@ -15,7 +14,7 @@ import {
 import { Easer, DispatcherMode } from './utils.js';
 import { ClickOverlay } from './stackoverlay.js';
 import { WorkspaceSettings } from './workspace.js';
-import { createTaskbarSync } from './taskbar.js';
+import { createTaskbarSync, createDashToPanelNudge } from './taskbar.js';
 
 const { signals: Signals } = imports;
 const workspaceManager = global.workspace_manager;
@@ -4760,13 +4759,14 @@ export function insertWindow(metaWindow, options = {}) {
             } catch (e) {
                 console.warn('#PaperWM scratch insert failed:', e?.message ?? e);
             }
-            // This window never joins a Space: re-assert the order so the
-            // survivors get contiguous ranks and a panel that may have
-            // sorted this window into the strip is corrected (forced nudge,
-            // still scheduled - never inline). No-op unless the setting is
-            // on.
+            // This window never joins a Space. Schedule a (gated) order pass:
+            // survivors keep contiguous ranks, and a panel is only re-sorted
+            // when the stamped order actually changed. Never *forced* here —
+            // a never-tiled scratch window leaves the order untouched, and a
+            // forced nudge on every scratch open was the main-thread stall of
+            // bugs/bugs.md §1.1. No-op unless the setting is on.
             try {
-                forceTaskbarResync();
+                scheduleTaskbarSync();
             } catch (_e) { /* best-effort */ }
             return;
         }
@@ -4796,19 +4796,18 @@ export function insertWindow(metaWindow, options = {}) {
         connectSizeChanged();
         showWindow(metaWindow);
         clearTaskbarPosition(metaWindow);
-        // Re-assert the order so a panel that sorted this sticky window
-        // into the strip is corrected (forced nudge, still scheduled).
+        // Sticky windows are in no Space: schedule a (gated) order pass.
+        // Never forced (see the scratch branch above; bugs/bugs.md §1.1).
         // No-op unless the setting is on.
         try {
-            forceTaskbarResync();
+            scheduleTaskbarSync();
         } catch (_e) { /* best-effort */ }
         return;
     } else if (Scratch.isScratchWindow(metaWindow)) {
         // And make sure scratch windows are stuck
         Scratch.makeScratch(metaWindow);
-        try {
-            forceTaskbarResync();
-        } catch (_e) { /* best-effort */ }
+        // makeScratch() schedules its own (gated) pass; this early return
+        // must not run a forced one (bugs/bugs.md §1.1).
         return;
     }
 
@@ -6729,9 +6728,12 @@ export function sortWindows(space, windows) {
  * the live shell adapters and keeps the historical exports. Nothing here
  * runs synchronously from a signal handler or layout pass:
  * `scheduleTaskbarSync()` debounces and defers, and every other entry point
- * (including `forceTaskbarResync()`) resolves to a scheduled pass. See
- * `taskbar.js` for the ordering rules, the signature gate, and the startup
- * burst cover chain (bugs/bugs.md §3.2).
+ * (including `forceTaskbarResync()`) resolves to a scheduled pass. The nudge
+ * targets Dash-to-Panel's own deferred redisplay
+ * (`createDashToPanelNudge()`) — never the global `AppFavorites 'changed'`
+ * broadcast, which ran shell listeners synchronously for seconds
+ * (bugs/bugs.md §1.1). See `taskbar.js` for the ordering rules, the
+ * signature gate, and the startup burst cover chain (bugs/bugs.md §3.2).
  */
 /**
  * Build a controller bound to the live shell (see `taskbar.js`).
@@ -6746,7 +6748,10 @@ function createLiveTaskbarSync() {
         }),
         clearTimeout: id => Utils.timeout_remove(id),
         scheduleIdle: fn => Utils.later_add(Meta.LaterType.IDLE, fn),
-        emitNudge: () => AppFavorites.getAppFavorites().emit('changed'),
+        emitNudge: createDashToPanelNudge({
+            getPanels: () => global?.dashToPanel?.panels,
+            logError: (...args) => console.error('PaperWM:', ...args),
+        }),
         getAllWindows: getTaskbarSweepWindows,
         logError: (...args) => console.error('PaperWM:', ...args),
     });
@@ -6804,6 +6809,10 @@ export function syncTaskbarOrder() {
  * while still enabling, or sorted a transient state (autostart burst at
  * login). Still scheduled (never inline); the signature is reset when the
  * deferred pass runs. No-op unless the setting is on.
+ *
+ * Prefer `scheduleTaskbarSync()` on window insertion paths: forcing there
+ * re-sorted the panel even when nothing in the stamped order changed, which
+ * is what made scratch-window opens stall (bugs/bugs.md §1.1).
  */
 export function forceTaskbarResync() {
     taskbarSync.forceResync();
@@ -6842,6 +6851,13 @@ export function beginTaskbarStartupPhase() {
  */
 export function endTaskbarStartupPhase() {
     taskbarSync.endStartupPhase();
+}
+
+/**
+ * Scheduler snapshot for tests / debugging (see `taskbar.js` `getState()`).
+ */
+export function getTaskbarSyncState() {
+    return taskbarSync.getState();
 }
 
 export function rotated(list, dir = 1) {

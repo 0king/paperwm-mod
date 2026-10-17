@@ -16,6 +16,7 @@ import {
     describe, it, assert
 } from './harness.js';
 import * as Tiling from '../tiling.js';
+import { createDashToPanelNudge } from '../taskbar.js';
 
 const scheduleTaskbarSync = Tiling.scheduleTaskbarSync;
 const syncTaskbarOrder = Tiling.syncTaskbarOrder;
@@ -24,6 +25,7 @@ const clearTaskbarPosition = Tiling.clearTaskbarPosition;
 const clearTaskbarOrder = Tiling.clearTaskbarOrder;
 const beginTaskbarStartupPhase = Tiling.beginTaskbarStartupPhase;
 const endTaskbarStartupPhase = Tiling.endTaskbarStartupPhase;
+const getTaskbarSyncState = Tiling.getTaskbarSyncState;
 
 describe('taskbar wiring — exported surface', () => {
     it('exports every historical entry point as a function', () => {
@@ -34,6 +36,7 @@ describe('taskbar wiring — exported surface', () => {
         assert(typeof clearTaskbarOrder === 'function');
         assert(typeof beginTaskbarStartupPhase === 'function');
         assert(typeof endTaskbarStartupPhase === 'function');
+        assert(typeof getTaskbarSyncState === 'function');
     });
 
     it('no call site crashes the shell when invoked directly', () => {
@@ -83,5 +86,21 @@ describe('clearTaskbarOrder() wiring', () => {
 describe('forceTaskbarResync() wiring', () => {
     it('does not throw', () => {
         assert(!forceTaskbarResync());
+    });
+});
+
+describe('Dash-to-Panel nudge wiring (bugs/bugs.md §1.1)', () => {
+    it('the live panels accessor never throws (DTP may be absent)', () => {
+        const nudge = createDashToPanelNudge({
+            getPanels: () => global?.dashToPanel?.panels,
+        });
+        assert(typeof nudge() === 'boolean');
+    });
+
+    it('getTaskbarSyncState() returns the scheduler snapshot', () => {
+        const state = getTaskbarSyncState();
+        assert(state && typeof state === 'object');
+        assert('pendingForce' in state);
+        assert('disposed' in state);
     });
 });

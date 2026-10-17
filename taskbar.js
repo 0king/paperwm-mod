@@ -7,8 +7,10 @@
  * DTP's `getWindowStableSequence()` prefers `_dtpPosition`, and an app's
  * icon position is the minimum sequence among its windows. This module
  * mirrors PaperWM's spatial order into `_dtpPosition`, and nudges DTP to
- * re-sort by emitting `AppFavorites` `'changed'` (its `_queueRedisplay`
- * listener).
+ * re-sort via its own deferred redisplay (`createDashToPanelNudge()`).
+ * It deliberately does *not* emit `AppFavorites` `'changed'`: that runs
+ * every shell listener synchronously (`AppDisplay._redisplay()`, ~1.5 s on
+ * scratch-window opens) instead of just reaching DTP (`bugs/bugs.md` §1.1).
  *
  * ## Why a scheduler instead of direct calls
  *
@@ -78,7 +80,8 @@ const noop = () => {};
  * @param {(id: any) => void} [deps.clearTimeout] Cancel a timer.
  * @param {(fn: Function) => void} [deps.scheduleIdle] Defer to an idle
  *   callback; falls back to `setTimeout(fn, 0)` when omitted.
- * @param {() => void} [deps.emitNudge] Emit the taskbar re-sort signal.
+ * @param {() => void} [deps.emitNudge] Ask the panel to re-sort (see
+ *   `createDashToPanelNudge()`; tests inject counters here).
  * @param {() => Array} [deps.getAllWindows] Global window sweep for clears.
  * @param {(...args: any[]) => void} [deps.logError] Error sink.
  * @param {Partial<typeof TaskbarSyncDefaults>} [deps.config] Tunables.
@@ -638,5 +641,66 @@ export function createTaskbarSync(deps = {}) {
         endStartupPhase,
         dispose,
         getState,
+    };
+}
+
+/**
+ * Build the Dash-to-Panel re-sort nudge.
+ *
+ * The nudge's only job is to make DTP re-run its deferred icon/preview sort.
+ * DTP does that on `AppFavorites` `'changed'` via `Taskbar._queueRedisplay()`
+ * (`Main.queueDeferredWork`), but emitting that global signal also runs
+ * every *other* listener synchronously — GNOME Shell's
+ * `AppDisplay._redisplay()` among them — which stalled the main thread for
+ * up to ~1.7 s on scratch-window opens (`bugs/bugs.md` §1.1). So queue
+ * DTP's redisplay directly, on every panel, and do nothing when DTP is
+ * absent: without DTP nothing consumes `window._dtpPosition`, so there is
+ * nothing to re-sort.
+ *
+ * All access is guarded: a DTP version that changes shape (no
+ * `global.dashToPanel.panels`, no `taskbar`, no `_queueRedisplay`) degrades
+ * to a no-op nudge, never a throw.
+ *
+ * @param {object} [deps] Injected platform hooks.
+ * @param {() => Array|null} [deps.getPanels] Live DTP panels accessor
+ *   (`global.dashToPanel.panels`).
+ * @param {(...args: any[]) => void} [deps.logError] Error sink.
+ * @returns {() => boolean} Nudge function: returns true when at least one
+ *   panel's redisplay was queued. Never throws.
+ */
+export function createDashToPanelNudge(deps = {}) {
+    const getPanels = typeof deps.getPanels === 'function' ? deps.getPanels : () => null;
+    const logError = typeof deps.logError === 'function'
+        ? deps.logError
+        : (...args) => console.error('PaperWM taskbar:', ...args);
+
+    return function nudgeDashToPanel() {
+        let panels = [];
+        try {
+            const value = getPanels();
+            if (Array.isArray(value)) {
+                panels = value;
+            } else if (value) {
+                panels = Array.from(value);
+            }
+        } catch (e) {
+            logError('taskbar nudge: cannot read Dash-to-Panel panels', e);
+            return false;
+        }
+
+        let nudged = false;
+        for (const panel of panels) {
+            // One broken panel must not hide the others.
+            try {
+                const queue = panel?.taskbar?._queueRedisplay;
+                if (typeof queue === 'function') {
+                    queue.call(panel.taskbar);
+                    nudged = true;
+                }
+            } catch (e) {
+                logError('taskbar nudge failed', e);
+            }
+        }
+        return nudged;
     };
 }

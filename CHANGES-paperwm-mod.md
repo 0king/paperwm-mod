@@ -326,7 +326,53 @@ dispose, startup chains, hostile inputs, and the §3.2 regression scenarios
 startup chain on a mid-session enable). `tests/tiling-taskbar.test.js` is a
 shell-session wiring smoke test.
 
+## 15) Taskbar nudge targets Dash-to-Panel directly; scratch opens stay gated (`bugs/bugs.md` §1.1)
+
+Follow-up to §14. The scheduler took taskbar work off the `first-frame`
+stack, but two problems remained on window insertion:
+
+- The scratch/sticky entry paths still used the **forced** nudge
+  (`forceTaskbarResync()`), which re-sorts the panel even when the stamped
+  order did not change. A scratch window that never tiles (e.g. Vicinae via a
+  `scratch_layer` winprop) does not alter the order, so that nudge was pure
+  overhead — and when it ran inline (pre-§14 code) it measured as a 1.5–1.7 s
+  main-thread block starting ~40 ms after the window appeared.
+- The nudge emitted the global `AppFavorites 'changed'` signal. Every
+  listener then runs synchronously — GNOME Shell's `AppDisplay._redisplay()`
+  among them (DTP's own listener is deferred) — even though Dash-to-Panel is
+  the only intended consumer of `_dtpPosition`.
+
+Changes:
+
+- `taskbar.js`: new `createDashToPanelNudge(deps)`. It queues DTP's own
+  deferred redisplay on every panel (`global.dashToPanel.panels[].taskbar.
+  _queueRedisplay()` — the same path DTP's `AppFavorites` listener uses) and
+  is a guarded no-op when DTP is absent or shaped differently. The scheduler's
+  `emitNudge` dep is wired to it in `tiling.js`; the `AppFavorites` import is
+  gone. Without DTP nothing consumes `_dtpPosition`, so skipping the global
+  broadcast is safe.
+- `scratch.js makeScratch()` and `tiling.js insertWindow()`'s scratch/sticky
+  branches now call `scheduleTaskbarSync()` (signature-gated) instead of
+  `forceTaskbarResync()` (forced). Toggling a tiled window to scratch still
+  nudges exactly once (it leaves its Space → the order signature changes);
+  a fresh never-tiled scratch window does not nudge at all.
+- New introspection export `tiling.js getTaskbarSyncState()` (wraps the
+  scheduler's `getState()`; used by the shell-session smoke tests).
+- `forceTaskbarResync()` stays exported for genuinely stale-panel cases
+  (historical/compat; no longer called from window-insertion paths).
+
+Tests: plain gjs — `tests/taskbar.test.js` gained 9 cases: nudge target
+selection (every panel queued, receiver binding, iterables, malformed/absent
+panels, throwing accessor/panel) and the §1.1 regression scenarios
+(never-tiled scratch window ⇒ no nudge; tile→scratch toggle ⇒ exactly one
+nudge). Shell session — `tests/scratch.test.js` (entry path runs, no forced
+pass queued) and `tests/tiling-taskbar.test.js` (live panels accessor +
+`getTaskbarSyncState()`). Acceptance: after a Shell restart with
+`sync-taskbar-order=true`, the RTT sampler shows no multi-second main-thread
+block during `vicinae open`.
+
 ## Kill-switches & rollback
+
 
 - Span mode: `tiling.js:52` `SPAN_ALL_MONITORS = true → false` restores upstream per-monitor Spaces without reverting other fixes (overview/patches guards are span-conditional).
 - Taskbar sync: `sync-taskbar-order = false` (default) or disable the extension — zero effect without a compatible taskbar, and nothing runs inline (all work is debounced + idle-deferred; the startup chain is bounded by `startupResyncDelaysMs`/`startupPhaseMs` and cancelled on dispose).

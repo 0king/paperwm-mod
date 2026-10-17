@@ -10,6 +10,10 @@
  *   - ordering: spaces by workspace index, tiled before floating, globally
  *     unique contiguous `_dtpPosition` ranks
  *   - signature gate: nudges only on real order changes
+ *   - nudge targeting: Dash-to-Panel's own deferred redisplay, never the
+ *     global `AppFavorites 'changed'` broadcast (bugs/bugs.md §1.1)
+ *   - scratch-window opens stay gated: no nudge when the order is unchanged
+ *     (bugs/bugs.md §1.1)
  *   - forceResync bypasses the gate (and is still deferred)
  *   - startup phase: bounded forced re-assert chains, so a panel that
  *     enabled late / painted an early snapshot is corrected — the actual
@@ -26,7 +30,7 @@
 import {
     describe, it, eq, assert
 } from './harness.js';
-import { createTaskbarSync, TaskbarSyncDefaults } from '../taskbar.js';
+import { createTaskbarSync, createDashToPanelNudge, TaskbarSyncDefaults } from '../taskbar.js';
 
 // ---------------------------------------------------------------------------
 // Fake clock: deterministic stand-in for GLib timeouts + Meta idle callbacks.
@@ -1010,6 +1014,143 @@ describe('regression: login autostart burst (bugs/bugs.md §3.2)', () => {
         h.clock.advance(2000);
         eq(h.env.nudges, 1);
         eq(h.sync.getState().startupChainsStarted, 0);
+    });
+});
+
+// ---------------------------------------------------------------------------
+// Nudge target: Dash-to-Panel's own deferred redisplay (bugs/bugs.md §1.1)
+// ---------------------------------------------------------------------------
+
+/** Panel stub exposing the DTP taskbar contract used by the nudge. */
+function makePanel() {
+    const calls = [];
+    const taskbar = {
+        _queueRedisplay() {
+            calls.push(this);
+        },
+    };
+    return { panel: { taskbar }, taskbar, calls };
+}
+
+describe('Dash-to-Panel nudge — target selection (bugs/bugs.md §1.1)', () => {
+    it('queues the deferred redisplay on every panel', () => {
+        const a = makePanel();
+        const b = makePanel();
+        const nudge = createDashToPanelNudge({ getPanels: () => [a.panel, b.panel] });
+        assert(nudge() === true);
+        eq(a.calls.length, 1);
+        eq(b.calls.length, 1);
+    });
+
+    it('invokes _queueRedisplay with the taskbar as receiver', () => {
+        const a = makePanel();
+        const nudge = createDashToPanelNudge({ getPanels: () => [a.panel] });
+        nudge();
+        assert(a.calls[0] === a.taskbar);
+    });
+
+    it('accepts any iterable panel collection', () => {
+        const a = makePanel();
+        const nudge = createDashToPanelNudge({ getPanels: () => new Set([a.panel]) });
+        assert(nudge() === true);
+        eq(a.calls.length, 1);
+    });
+
+    it('skips panels without a taskbar or without _queueRedisplay', () => {
+        const errors = [];
+        const nudge = createDashToPanelNudge({
+            getPanels: () => [null, {}, { taskbar: null }, { taskbar: {} },
+                { taskbar: { _queueRedisplay: 42 } }],
+            logError: (...args) => errors.push(args),
+        });
+        assert(nudge() === false);
+        eq(errors.length, 0); // malformed panels are skipped, not errors
+    });
+
+    it('never lets one broken panel hide the others', () => {
+        const good = makePanel();
+        const bad = {
+            taskbar: {
+                _queueRedisplay() {
+                    throw new Error('boom');
+                },
+            },
+        };
+        const errors = [];
+        const nudge = createDashToPanelNudge({
+            getPanels: () => [bad, good.panel],
+            logError: (...args) => errors.push(args),
+        });
+        assert(nudge() === true);
+        eq(good.calls.length, 1);
+        eq(errors.length, 1);
+    });
+
+    it('returns false and logs when the panels accessor throws', () => {
+        const errors = [];
+        const nudge = createDashToPanelNudge({
+            getPanels: () => { throw new Error('no DTP'); },
+            logError: (...args) => errors.push(args),
+        });
+        assert(nudge() === false);
+        eq(errors.length, 1);
+    });
+
+    it('is a silent no-op when Dash-to-Panel is absent', () => {
+        for (const value of [null, undefined, []]) {
+            const errors = [];
+            const nudge = createDashToPanelNudge({
+                getPanels: () => value,
+                logError: (...args) => errors.push(args),
+            });
+            assert(nudge() === false);
+            eq(errors.length, 0);
+        }
+        const bare = createDashToPanelNudge();
+        assert(bare() === false); // no accessor configured: no-op, no throw
+    });
+});
+
+describe('regression: scratch-window open stays gated (bugs/bugs.md §1.1)', () => {
+    it('a scratch window that never joins a Space does not trigger a nudge', () => {
+        const tiled = makeWindow(1);
+        const h = makeSync({ spaces: makeSpaces(makeSpace(0, [tiled])) });
+        h.sync.schedule();
+        h.clock.advance(50);
+        eq(h.env.nudges, 1); // window lands in the strip: panel sorted once
+
+        // Scratch window opens (winprop `scratch_layer`): it is `stick()`ed,
+        // never joins a Space and is never stamped. `makeScratch()` schedules
+        // a *gated* pass — the order signature is unchanged, so the panel
+        // must not be re-sorted, and the shell main thread stays quiet.
+        const scratch = makeWindow(2);
+        h.sync.schedule();
+        h.clock.advance(50);
+
+        eq(scratch._dtpPosition, undefined);
+        eq(h.env.nudges, 1);
+    });
+
+    it('a toggle to scratch (tiled window leaves the Space) still nudges once', () => {
+        const tiled = makeWindow(1);
+        const other = makeWindow(2);
+        const windows = [tiled, other];
+        const h = makeSync({ spaces: makeSpaces(makeSpace(0, windows)) });
+        h.sync.schedule();
+        h.clock.advance(50);
+        eq(h.env.nudges, 1);
+
+        // toggle(): makeScratch() removes it from the Space (which also
+        // deletes its rank, tiling.js removeWindow/clearTaskbarPosition)
+        // and schedules a pass. The signature changed, so the panel is
+        // re-sorted exactly once (gated pass — no force needed).
+        windows.splice(windows.indexOf(tiled), 1);
+        delete tiled._dtpPosition;
+        h.sync.schedule();
+        h.clock.advance(50);
+
+        eq(tiled._dtpPosition, undefined);
+        eq(h.env.nudges, 2);
     });
 });
 
