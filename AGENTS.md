@@ -65,7 +65,9 @@ The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and 
 
 ## code edits
 - whenever code changes, document it in a change file.
-- run tests to check regression
+- run tests after edits to check regression
 - when a bug is reported, document it in bugs/ with a brief description.
+- ask clarifying questions, dont assume
+- write tests for new features
 
 Live-toggle side effects for the running session go in `tiling.js` (see `sync-taskbar-order` handler), not in `prefs.js`.
