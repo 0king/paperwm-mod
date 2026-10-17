@@ -15,6 +15,7 @@ import {
 import { Easer, DispatcherMode } from './utils.js';
 import { ClickOverlay } from './stackoverlay.js';
 import { WorkspaceSettings } from './workspace.js';
+import { createTaskbarSync } from './taskbar.js';
 
 const { signals: Signals } = imports;
 const workspaceManager = global.workspace_manager;
@@ -220,6 +221,10 @@ export let inGrab;
 export function enable(extension) {
     inGrab = false;
 
+    // Fresh taskbar sync controller: `disable()` disposes the previous one
+    // and the shell can enable/disable extensions repeatedly in a session.
+    taskbarSync = createLiveTaskbarSync();
+
     displayConfig = new Utils.DisplayConfig();
     saveState = saveState ?? new SaveState();
 
@@ -268,7 +273,7 @@ export function enable(extension) {
     gsettings.connect('changed::selection-border-radius-bottom', changedBorder);
     gsettings.connect('changed::sync-taskbar-order', () => {
         if (Settings.prefs.sync_taskbar_order) {
-            syncTaskbarOrder();
+            scheduleTaskbarSync();
         } else {
             clearTaskbarOrder();
         }
@@ -366,36 +371,23 @@ export function enable(extension) {
             });
         });
 
-        // Apply Dash-to-Panel order override if the setting is on
-        // (layouts during init already sync, this covers restored sessions).
-        syncTaskbarOrder();
-
-        // Startup race cover: autostart windows (e.g. two Brave profiles +
-        // Obsidian via xdg-open) arrive in a burst around startup-complete
-        // while taskbars may still be enabling or may have painted an early
-        // snapshot. The signature gate would then suppress a re-nudge (order
-        // unchanged since the synchronous sync above), leaving a panel that
-        // painted early or missed the nudge stale - e.g. a late vault window
-        // missing. Re-assert once settled with a forced nudge; no-ops
-        // unless the setting is on and never throws.
-        try {
-            Utils.later_add(Meta.LaterType.IDLE, () => {
-                try {
-                    forceTaskbarResync();
-                } catch (_e) { /* best-effort */ }
-                try {
-                    GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
-                        try {
-                            forceTaskbarResync();
-                        } catch (_e) { /* best-effort */ }
-                        return false;
-                    });
-                } catch (_e) { /* ignore */ }
-            });
-        } catch (_e) { /* ignore - synchronous sync above already ran */ }
+        // Apply Dash-to-Panel order override if the setting is on.
+        // Scheduled (debounced + idle): layouts during init already queued
+        // passes, this covers restored sessions; the startup burst cover
+        // chain (beginTaskbarStartupPhase) handles the login race where a
+        // taskbar may still be enabling while autostart windows arrive.
+        // See taskbar.js / bugs/bugs.md §3.2.
+        scheduleTaskbarSync();
     };
 
     if (Main.layoutManager._startingUp) {
+        // Login-time startup: autostart windows (e.g. two Brave profiles +
+        // Obsidian via xdg-open) arrive in a burst around startup-complete
+        // while Dash-to-Panel may still be enabling, or may have painted an
+        // early snapshot. While this phase is active, every taskbar pass
+        // arms a bounded chain of forced re-asserts so a slow or late app
+        // cannot stay missing/misordered. No-op unless the setting is on.
+        beginTaskbarStartupPhase();
         // Defer workspace initialization until existing windows are accessible.
         // Otherwise we're unable to restore the tiling-order. (when restarting
         // gnome-shell)
@@ -441,8 +433,10 @@ export function disable() {
     saveState.prepare();
     displayConfig.downgradeGnomeMonitors();
     displayConfig = null;
-    // Restore Dash-to-Panel's native sorting before tearing down spaces.
+    // Restore Dash-to-Panel's native sorting before tearing down spaces,
+    // then stop every queued taskbar pass (debounce + startup chain timers).
     clearTaskbarOrder();
+    taskbarSync.dispose();
     spaces.destroy();
     inGrab = null;
     gsettings = null;
@@ -1105,10 +1099,10 @@ export class Space extends Array {
         });
 
         // Mirror spatial order into `window._dtpPosition` for Dash-to-Panel
-        // (ungrouped icons / previews). Synchronous so DTP's deferred
-        // `_redisplay` (queued on window-added/removed) sees fresh values.
-        // No-op unless `sync-taskbar-order` is enabled. Cheap: O(windows).
-        syncTaskbarOrder();
+        // (ungrouped icons / previews). Debounced + idle-deferred: layout
+        // runs in the shell hot path, taskbar work must never run inline
+        // (bugs/bugs.md §3.2). No-op unless `sync-taskbar-order` is on.
+        scheduleTaskbarSync();
 
         this.emit('layout', this);
     }
@@ -1381,7 +1375,7 @@ export class Space extends Array {
         this._floating.push(metaWindow);
         let clone = metaWindow.clone;
         Utils.actor_reparent(clone, this.actor);
-        syncTaskbarOrder();
+        scheduleTaskbarSync();
         return true;
     }
 
@@ -1397,7 +1391,7 @@ export class Space extends Array {
                 delete metaWindow._dtpPosition;
             }
         } catch (_e) { /* ignore */ }
-        syncTaskbarOrder();
+        scheduleTaskbarSync();
         return true;
     }
 
@@ -3982,12 +3976,12 @@ export const Spaces = class Spaces extends Map {
 
         metaWindow.unmapped = true;
 
-        // Provisional PaperWM-order rank for taskbars (e.g. Dash-to-Panel
-        // ungrouped icons). This runs synchronously on display::window-created,
-        // i.e. before workspace::window-added, so taskbars that sort in
-        // deferred idle work already see tiling order on their first sort.
-        // Corrected by syncTaskbarOrder() once first-frame placement lands.
-        stampProvisionalTaskbarPosition(metaWindow);
+        // Taskbar order (e.g. Dash-to-Panel `_dtpPosition`). Scheduled only:
+        // no synchronous stamping on display::window-created. The pass runs
+        // after the window lands in a Space / layout, and the forced-nudge
+        // startup chain corrects taskbars that painted before that
+        // (bugs/bugs.md §3.2). No-op unless the setting is on.
+        scheduleTaskbarSync();
 
         console.debug('window-created', metaWindow?.title);
         let actor = metaWindow.get_compositor_private();
@@ -4330,6 +4324,9 @@ export function removePaperWMFlags(w) {
     delete w._fullscreen_lock;
     delete w._fullscreen_above;
     delete w._last_layout_frame;
+    // Released windows keep no PaperWM taskbar rank (Dash-to-Panel would
+    // otherwise sort the native window by a stale override).
+    delete w._dtpPosition;
 }
 
 export function addPositionHandler(metaWindow) {
@@ -4763,11 +4760,11 @@ export function insertWindow(metaWindow, options = {}) {
             } catch (e) {
                 console.warn('#PaperWM scratch insert failed:', e?.message ?? e);
             }
-            // The provisional stamp shifted tiled ranks to make room, but
-            // this window never joins a Space: re-sync the survivors back
-            // to contiguous ranks, forcing the nudge (the signature is
-            // unchanged, but a panel may have painted the provisional that
-            // included this window). No-op unless the setting is on.
+            // This window never joins a Space: re-assert the order so the
+            // survivors get contiguous ranks and a panel that may have
+            // sorted this window into the strip is corrected (forced nudge,
+            // still scheduled - never inline). No-op unless the setting is
+            // on.
             try {
                 forceTaskbarResync();
             } catch (_e) { /* best-effort */ }
@@ -4799,9 +4796,9 @@ export function insertWindow(metaWindow, options = {}) {
         connectSizeChanged();
         showWindow(metaWindow);
         clearTaskbarPosition(metaWindow);
-        // Provisional stamp (if any) shifted tiled ranks: restore
-        // contiguity for the survivors, forcing the nudge (same rationale
-        // as above). No-op unless the setting is on.
+        // Re-assert the order so a panel that sorted this sticky window
+        // into the strip is corrected (forced nudge, still scheduled).
+        // No-op unless the setting is on.
         try {
             forceTaskbarResync();
         } catch (_e) { /* best-effort */ }
@@ -6725,318 +6722,91 @@ export function sortWindows(space, windows) {
 }
 
 /**
- * Dash-to-Panel orders ungrouped taskbar icons (and window previews) by
- * `MetaWindow.get_stable_sequence()` (creation order), which cannot be
- * changed. Recent Dash-to-Panel versions prefer a `window._dtpPosition`
- * override when present (set by manual icon drags).
+ * Taskbar order sync — Dash-to-Panel `_dtpPosition` overrides.
  *
- * When the `sync-taskbar-order` setting is enabled, mirror PaperWM's
- * spatial (left-to-right) order into `_dtpPosition` so the taskbar matches
- * PaperWM. Positions are globally unique across workspaces (ordered by
- * workspace index) so both `isolate-workspaces=true` and `false`
- * configurations sort correctly. Floating windows are appended after tiled
- * windows. Windows with `skip_taskbar` are still stamped (harmless: DTP
- * filters them out).
+ * The implementation lives in `taskbar.js` (dependency-injected, fully
+ * unit-tested in plain gjs: `tests/taskbar.test.js`); this module only wires
+ * the live shell adapters and keeps the historical exports. Nothing here
+ * runs synchronously from a signal handler or layout pass:
+ * `scheduleTaskbarSync()` debounces and defers, and every other entry point
+ * (including `forceTaskbarResync()`) resolves to a scheduled pass. See
+ * `taskbar.js` for the ordering rules, the signature gate, and the startup
+ * burst cover chain (bugs/bugs.md §3.2).
+ */
+/**
+ * Build a controller bound to the live shell (see `taskbar.js`).
+ */
+function createLiveTaskbarSync() {
+    return createTaskbarSync({
+        isEnabled: () => Settings?.prefs?.sync_taskbar_order === true,
+        getSpaces: () => spaces,
+        setTimeout: (fn, ms) => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            fn();
+            return false; // one-shot: destroy the source
+        }),
+        clearTimeout: id => Utils.timeout_remove(id),
+        scheduleIdle: fn => Utils.later_add(Meta.LaterType.IDLE, fn),
+        emitNudge: () => AppFavorites.getAppFavorites().emit('changed'),
+        getAllWindows: getTaskbarSweepWindows,
+        logError: (...args) => console.error('PaperWM:', ...args),
+    });
+}
+
+/**
+ * Live controller. Re-created in `enable()` because `disable()` disposes it
+ * (the shell may enable/disable extensions repeatedly in one session).
+ */
+let taskbarSync = createLiveTaskbarSync();
+
+/**
+ * Windows to sweep when clearing overrides: every mapped window, including
+ * ones that never joined a Space (scratch/sticky/launcher overlays), so a
+ * stale rank cannot collide with tiled ranks after disable/setting-off.
+ */
+function getTaskbarSweepWindows() {
+    try {
+        if (typeof global !== 'undefined' && global?.get_window_actors) {
+            return global.get_window_actors().map(a => {
+                try {
+                    return a?.meta_window ?? a?.get_meta_window?.();
+                } catch (_e) {
+                    return null;
+                }
+            }).filter(Boolean);
+        }
+    } catch (_e) { /* ignore */ }
+    try {
+        return display?.get_tab_list?.(Meta.TabList.NORMAL_ALL, null) ?? [];
+    } catch (_e) {
+        return [];
+    }
+}
+
+/**
+ * Schedule a debounced, idle-deferred taskbar order pass. Safe to call from
+ * hot paths (layout, window signals, floating add/remove).
+ */
+export function scheduleTaskbarSync() {
+    taskbarSync.schedule();
+}
+
+/**
+ * Historical name for `scheduleTaskbarSync()` (kept for compatibility with
+ * `config/user.js` and older tests). It no longer performs synchronous work.
  */
 export function syncTaskbarOrder() {
-    if (!spaces || !Settings?.prefs?.sync_taskbar_order) {
-        return;
-    }
-    try {
-        let orderedSpaces;
-        try {
-            orderedSpaces = [...spaces.values()];
-        } catch (_e) {
-            return; // spaces torn down mid-call; nothing to stamp
-        }
-        // Defensive sort: a single dead workspace must never abort the
-        // whole sync (that would leave every window with stale ranks).
-        try {
-            orderedSpaces.sort((a, b) => {
-                let ai = 0, bi = 0;
-                try {
-                    ai = a?.workspace?.index?.() ?? 0;
-                } catch (_e) { ai = 0; }
-                try {
-                    bi = b?.workspace?.index?.() ?? 0;
-                } catch (_e) { bi = 0; }
-                // Guard against NaN/non-numeric indices.
-                if (!Number.isFinite(ai)) {
-                    ai = 0;
-                }
-                if (!Number.isFinite(bi)) {
-                    bi = 0;
-                }
-                return ai - bi;
-            });
-        } catch (_e) { /* keep insertion order on sort failure */ }
-        let pos = 0;
-        let signature = [];
-        for (let space of orderedSpaces) {
-            if (!space) {
-                continue;
-            }
-            let tiled = [];
-            let floating = [];
-            try {
-                tiled = space.getWindows?.() ?? [];
-            } catch (_e) {
-                tiled = []; // one bad space must not hide others
-            }
-            try {
-                floating = space._floating ?? [];
-            } catch (_e) {
-                floating = [];
-            }
-            // Stamping and signature collection are isolated per window:
-            // a throwing get_stable_sequence() must not skip the stamp,
-            // and must not blind the nudge gate (fallback id keeps the
-            // signature sensitive to membership/order changes).
-            for (let w of tiled) {
-                if (!w) {
-                    continue;
-                }
-                try {
-                    w._dtpPosition = pos;
-                } catch (_e) { /* ignore dead windows */ }
-                try {
-                    signature.push(w.get_stable_sequence());
-                } catch (_e) {
-                    try {
-                        signature.push(`id:${w.get_id?.() ?? pos}`);
-                    } catch (_e2) {
-                        signature.push(`pos:${pos}`);
-                    }
-                }
-                pos++;
-            }
-            for (let w of floating) {
-                if (!w) {
-                    continue;
-                }
-                try {
-                    w._dtpPosition = pos;
-                } catch (_e) { /* ignore dead windows */ }
-                try {
-                    signature.push(w.get_stable_sequence());
-                } catch (_e) {
-                    try {
-                        signature.push(`id:${w.get_id?.() ?? pos}`);
-                    } catch (_e2) {
-                        signature.push(`pos:${pos}`);
-                    }
-                }
-                pos++;
-            }
-        }
-        nudgeTaskbarOrder(signature.join(','));
-    } catch (e) {
-        console.error('PaperWM: syncTaskbarOrder failed', e);
-    }
-}
-
-/**
- * Stamp a provisional PaperWM-order rank on a not-yet-placed window.
- *
- * Taskbars like Dash-to-Panel sort in deferred idle work triggered by
- * workspace::window-added, which fires before our first-frame placement.
- * Without this, a new window sorts by creation order on its first paint
- * and nothing ever re-sorts it. The prediction reuses
- * getOpenWindowPositionIndex(), the same function insertWindow() will use,
- * so it is exact unless focus changes between window-created and
- * first-frame (syncTaskbarOrder() corrects any drift, then nudges).
- */
-export function stampProvisionalTaskbarPosition(metaWindow) {
-    if (!spaces || !Settings?.prefs?.sync_taskbar_order || !metaWindow) {
-        return;
-    }
-    try {
-        try {
-            if (metaWindow.is_on_all_workspaces?.()) {
-                return; // never tiled into a Space; leave native sorting
-            }
-        } catch (_e) {
-            return; // dead window; nothing to stamp
-        }
-        let targetSpace = null;
-        try {
-            targetSpace = spaces.selectedSpace;
-        } catch (_e) {
-            targetSpace = null;
-        }
-        if (!targetSpace) {
-            return;
-        }
-        let insertIndex = 0;
-        try {
-            insertIndex = getOpenWindowPositionIndex(targetSpace);
-        } catch (_e) {
-            insertIndex = targetSpace.length ?? 0;
-        }
-        if (!Number.isFinite(insertIndex) || insertIndex < 0) {
-            insertIndex = 0;
-        }
-        let orderedSpaces;
-        try {
-            orderedSpaces = [...spaces.values()];
-        } catch (_e) {
-            return;
-        }
-        try {
-            orderedSpaces.sort((a, b) => {
-                let ai = 0, bi = 0;
-                try {
-                    ai = a?.workspace?.index?.() ?? 0;
-                } catch (_e) { ai = 0; }
-                try {
-                    bi = b?.workspace?.index?.() ?? 0;
-                } catch (_e) { bi = 0; }
-                if (!Number.isFinite(ai)) {
-                    ai = 0;
-                }
-                if (!Number.isFinite(bi)) {
-                    bi = 0;
-                }
-                return ai - bi;
-            });
-        } catch (_e) { /* keep insertion order */ }
-        let pos = 0;
-        for (let space of orderedSpaces) {
-            if (!space) {
-                continue;
-            }
-            if (space === targetSpace) {
-                // flat position of the insertion column = tiled windows in
-                // preceding columns (exact for column inserts; approximate
-                // for DOWN/UP stacks, which slurp post-insert)
-                let flat = 0;
-                try {
-                    let cols = Math.min(insertIndex, space.length ?? 0);
-                    for (let i = 0; i < cols; i++) {
-                        try {
-                            flat += space[i]?.length ?? 0;
-                        } catch (_e) { /* ignore ragged columns */ }
-                    }
-                } catch (_e) {
-                    flat = 0;
-                }
-                if (!Number.isFinite(flat) || flat < 0) {
-                    flat = 0;
-                }
-                let windows = [];
-                try {
-                    windows = space.getWindows?.() ?? [];
-                } catch (_e) {
-                    windows = [];
-                }
-                // Clamp: a stale insertIndex must never push the newcomer
-                // past the end (that would leave a trailing gap).
-                if (flat > windows.length) {
-                    flat = windows.length;
-                }
-                for (let i = 0; i < windows.length; i++) {
-                    if (!windows[i]) {
-                        continue;
-                    }
-                    try {
-                        windows[i]._dtpPosition = pos + (i < flat ? i : i + 1);
-                    } catch (_e) { /* ignore dead windows */ }
-                }
-                try {
-                    metaWindow._dtpPosition = pos + flat;
-                } catch (_e) { /* ignore */ }
-                pos += windows.length + 1;
-                let floating = [];
-                try {
-                    floating = space._floating ?? [];
-                } catch (_e) {
-                    floating = [];
-                }
-                for (let w of floating) {
-                    if (!w) {
-                        continue;
-                    }
-                    try {
-                        w._dtpPosition = pos++;
-                    } catch (_e) { /* ignore dead windows */ }
-                }
-            } else {
-                let windows = [];
-                try {
-                    windows = space.getWindows?.() ?? [];
-                } catch (_e) {
-                    windows = [];
-                }
-                for (let w of windows) {
-                    if (!w) {
-                        continue;
-                    }
-                    try {
-                        w._dtpPosition = pos++;
-                    } catch (_e) { /* ignore dead windows */ }
-                }
-                let floating = [];
-                try {
-                    floating = space._floating ?? [];
-                } catch (_e) {
-                    floating = [];
-                }
-                for (let w of floating) {
-                    if (!w) {
-                        continue;
-                    }
-                    try {
-                        w._dtpPosition = pos++;
-                    } catch (_e) { /* ignore dead windows */ }
-                }
-            }
-        }
-    } catch (e) {
-        console.error('PaperWM: stampProvisionalTaskbarPosition failed', e);
-    }
-}
-
-// Last order signature pushed to taskbars (see nudgeTaskbarOrder).
-let lastTaskbarSignature = null;
-
-/**
- * Ask taskbars to re-sort after the order actually changed.
- *
- * Dash-to-Panel re-sorts only on window-added/removed, app-state-changed,
- * favorites-changed, etc. — never on moves or on our late first-frame
- * stamping. Emitting AppFavorites 'changed' reaches its
- * `_queueRedisplay()` listener and forces a re-sort with the values
- * syncTaskbarOrder() just wrote. The signature gate keeps this to real
- * order changes (add/remove/move), never per-layout noise. Without a
- * compatible taskbar the only effect is a cheap GNOME Dash refresh.
- */
-function nudgeTaskbarOrder(signature) {
-    if (signature === lastTaskbarSignature) {
-        return;
-    }
-    lastTaskbarSignature = signature;
-    try {
-        AppFavorites.getAppFavorites().emit('changed');
-    } catch (e) {
-        console.error('PaperWM: nudgeTaskbarOrder failed', e);
-    }
+    scheduleTaskbarSync();
 }
 
 /**
  * Re-assert taskbar order even when the signature gate would suppress the
- * nudge (same order as last push). Needed when the panel's *view* may be
- * stale while our signature is unchanged: a panel that painted before our
- * stamps landed, missed the nudge while still enabling, or sorted a
- * transient state (e.g. autostart burst at login). Also used after removing
- * a window from the stamped set whose absence leaves the signature
- * unchanged (never-tiled scratch/sticky provisionals). No-op unless the
- * setting is on; never throws.
+ * nudge: a panel that painted before our stamps landed, missed the nudge
+ * while still enabling, or sorted a transient state (autostart burst at
+ * login). Still scheduled (never inline); the signature is reset when the
+ * deferred pass runs. No-op unless the setting is on.
  */
 export function forceTaskbarResync() {
-    lastTaskbarSignature = null;
-    try {
-        syncTaskbarOrder();
-    } catch (_e) { /* best-effort: sync logs its own failures */ }
+    taskbarSync.forceResync();
 }
 
 /**
@@ -7045,88 +6815,33 @@ export function forceTaskbarResync() {
  * keep a stale rank colliding with tiled windows).
  */
 export function clearTaskbarPosition(metaWindow) {
-    try {
-        if (metaWindow && '_dtpPosition' in metaWindow) {
-            delete metaWindow._dtpPosition;
-        }
-    } catch (_e) { /* ignore dead windows */ }
+    taskbarSync.clearPosition(metaWindow);
 }
 
 /**
- * Remove the `_dtpPosition` overrides set by `syncTaskbarOrder()`,
- * restoring Dash-to-Panel's native creation-order sorting.
- *
- * Besides the tiled+floating windows in every Space, this sweeps the
- * global window list for stale provisional ranks (scratch/sticky/
- * redirected windows that never joined a Space). Without the sweep a
- * leftover rank keeps colliding with tiled ranks after disable/setting-off.
+ * Remove the `_dtpPosition` overrides, cancelling any queued pass (a late
+ * debounce must not re-stamp after the setting was turned off), and restore
+ * Dash-to-Panel's native creation-order sorting. Sweeps every Space plus the
+ * global window list (`getTaskbarSweepWindows`).
  */
 export function clearTaskbarOrder() {
-    lastTaskbarSignature = null;
-    if (!spaces) {
-        return;
-    }
-    try {
-        for (let space of spaces.values()) {
-            if (!space) {
-                continue;
-            }
-            let stamped = [];
-            try {
-                stamped = [...(space.getWindows?.() ?? []), ...(space._floating ?? [])];
-            } catch (_e) {
-                continue; // one bad space must not block the sweep
-            }
-            for (let w of stamped) {
-                if (!w) {
-                    continue;
-                }
-                try {
-                    if ('_dtpPosition' in w) {
-                        delete w._dtpPosition;
-                    }
-                } catch (_e) { /* ignore dead windows */ }
-            }
-        }
-    } catch (e) {
-        console.error('PaperWM: clearTaskbarOrder failed', e);
-    }
-    // Sweep any window that never entered a Space (provisional stamps on
-    // scratch/sticky/redirected windows). Best-effort: any of these
-    // accessors may be unavailable during teardown.
-    try {
-        let all = [];
-        try {
-            if (typeof global !== 'undefined' && global?.get_window_actors) {
-                all = global.get_window_actors().map(a => {
-                    try {
-                        return a?.meta_window ?? a?.get_meta_window?.();
-                    } catch (_e) {
-                        return null;
-                    }
-                }).filter(Boolean);
-            }
-        } catch (_e) { /* ignore */ }
-        if (!all.length) {
-            try {
-                all = display?.get_tab_list?.(Meta.TabList.NORMAL_ALL, null) ?? [];
-            } catch (_e) {
-                all = [];
-            }
-        }
-        for (let w of all) {
-            if (!w) {
-                continue;
-            }
-            try {
-                if ('_dtpPosition' in w) {
-                    delete w._dtpPosition;
-                }
-            } catch (_e) { /* ignore dead windows */ }
-        }
-    } catch (e) {
-        console.error('PaperWM: clearTaskbarOrder sweep failed', e);
-    }
+    taskbarSync.clearOrder();
+}
+
+/**
+ * Begin the login startup burst cover: while active, every pass arms a
+ * bounded chain of forced re-asserts (see `taskbar.js`). Called from
+ * `enable()` when the shell is starting up.
+ */
+export function beginTaskbarStartupPhase() {
+    taskbarSync.beginStartupPhase();
+}
+
+/**
+ * End the startup phase early; performs one final forced re-assert.
+ */
+export function endTaskbarStartupPhase() {
+    taskbarSync.endStartupPhase();
 }
 
 export function rotated(list, dir = 1) {
