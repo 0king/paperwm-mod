@@ -14,9 +14,10 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 - `make install` — symlink repo into extensions dir, then `gnome-extensions enable paperwm-mod@paperwm.github.com`. Requires Shell restart after first install (logout/login, or Alt-F2 `r` on X11 only).
 - `make uninstall` — refuses unless target symlinks back to `$PWD`.
 - `make release` — builds `paperwm-mod@paperwm.github.com.zip` for EGO review.
+- `make test` — runs the gjs test suite (`tests/run.js`). `tests/lib.test.js` (pure functions) runs anywhere; the `tiling`/`navigator`/`scratch` suites require a GNOME Shell session (`gi://` imports resolve there — run inside `./shell.sh` or `nix run .#vm`). **Run `make test` after every change; a change is not complete until tests pass.**
 - Schema: after editing `schemas/org.gnome.shell.extensions.paperwm.gschema.xml`, regenerate with `make -C schemas gschemas.compiled` (i.e. `glib-compile-schemas .`) and **commit the binary** — prior commits do (`4476975`, `83e5f75`).
 - Lint: ESLint with `.eslintrc.yml` (GNOME GJS profile: 4-space indent, semicolons always, `eqeqeq`, no `==`). No lint script — run `eslint` directly on touched files.
-- No unit tests. Verify via: `nix run .#vm` (NixOS VM), `./shell.sh [--wayland]` (nested Shell; resets dconf, copies dbus addr to clipboard), or live logs `journalctl -f -o cat /usr/bin/gnome-shell` filtered with `./debug`.
+- Tests: `make test` (runner `tests/run.js`, framework `tests/harness.js`). `tests/lib.test.js` runs in plain `gjs`; suites importing `gi://` modules need a shell session. Add a test file under `tests/` for every new behavior or bug fix (see `tests/` for patterns).
 - Branch base is upstream `release`; PRs must target `develop` (bot auto-retargets `release` PRs — `.github/workflows/rebase-pr.yaml`).
 
 ## Architecture
@@ -34,6 +35,26 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 - Taskbar sync stamps `w._dtpPosition` and nudges via `AppFavorites.changed` (signature-gated); `clearTaskbarOrder()` on disable/setting-off. Gated by `sync-taskbar-order` (default `false`).
 - All-monitors ws switch/move wrap at ends (`wrap=true` passed from `keybindings.js`); `select*/move*Space` default `wrap=false`.
 - `patches.js` span guards are null-safe (`spaces?.`, try/catch) — keep that pattern so a missing `Space` never breaks overview rendering.
+
+## Testing
+
+Test files live under `tests/` and use the `tests/harness.js` framework (`describe`/`it`/`assert`/`eq`/`approx`/`throws`/`runAndExit`). `tests/run.js` imports every suite and reports a combined pass/fail with a non-zero exit code on failure.
+
+| File | What it covers | Runs in plain gjs? |
+|------|----------------|---------------------|
+| `tests/lib.test.js` | `lib.js` pure functions (`findNext`/`findPrev`, `arrayEqual`, `eq`, `swap`, `in_bounds`, `indent`, `sum`, `zip`) | Yes |
+| `tests/tiling-span.test.js` | `SPAN_ALL_MONITORS`, `getMonitorsBoundingBox`, `computeSpannedWorkArea`, `getPrimaryWorkAreaSpanCoords`, `moveWindowToPrimaryMonitor` | No (needs `gi://` + `resource:///`) |
+| `tests/tiling-focus.test.js` | `FocusModes`, `isFocusModeEnabled`, `setFocusModeEnabled`, `getDefaultFocusMode`, `getWindowPositionTargets`, cycle logic | No |
+| `tests/tiling-taskbar.test.js` | `syncTaskbarOrder`, `stampProvisionalTaskbarPosition`, `forceTaskbarResync`, `clearTaskbarPosition`, `clearTaskbarOrder` | No |
+| `tests/tiling-wrap.test.js` | `selectDownSpace`/`selectUpSpace`/`moveDownSpace`/`moveUpSpace` `wrap` param, `selectSequenceSpace` | No |
+| `tests/scratch.test.js` | `makeScratch`/`unmakeScratch` state contract, taskbar-rank cleanup | No |
+| `tests/navigator.test.js` | `primaryModifier` bit isolation | No |
+
+The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and `resource:///org/gnome/shell/...` which only resolve inside a running GNOME Shell. Run them with `make test` inside `./shell.sh` or `nix run .#vm`. `tests/lib.test.js` runs anywhere via `gjs -m tests/lib.test.js` or `make test`.
+
+`tests/mocks.js` provides `MockMonitor`, `MockWindow`, `MockSpace`, `MockSpaces`, `MockSettings`, and `makeGlobalMock()` for building controlled inputs in shell-session tests.
+
+**Rule: add a test file (or cases to an existing one) under `tests/` for every new behavior or bug fix.** A change is not complete until `make test` passes.
 
 ## Adding/changing a setting — all 4 places
 
