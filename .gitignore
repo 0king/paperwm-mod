@@ -3,6 +3,7 @@ TAGS
 
 # any generated extension zip
 paperwm@paperwm.github.com.zip
+paperwm-mod@paperwm.github.com.zip
 
 # eslint support files
 node_modules/
@@ -11,3 +12,4 @@ package-lock.json
 
 # generated disk image for test VM
 nixos.qcow2
+.aider*
