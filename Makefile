@@ -95,6 +95,13 @@ schemas/gschemas.compiled: $(GSCHEMA_FILES)
 	@$(call rich_echo,"MAKE","$@")
 	@$(MAKE) -C schemas gschemas.compiled
 
-.PHONY: install uninstall release
+## Run the paperwm-mod test suite (gjs).
+## lib.test.js (pure functions) runs anywhere; the tiling/navigator/scratch
+## suites require a GNOME Shell session (gi:// imports resolve there).
+test:
+	@$(call rich_echo,"TEST","running gjs test suite")
+	@gjs -m tests/run.js
+
+.PHONY: install uninstall release test
 
 include lib.mk
