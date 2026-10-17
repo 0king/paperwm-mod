@@ -371,6 +371,23 @@ pass queued) and `tests/tiling-taskbar.test.js` (live panels accessor +
 `sync-taskbar-order=true`, the RTT sampler shows no multi-second main-thread
 block during `vicinae open`.
 
+## 16) Version naming: upstream base + local timestamp
+
+This fork keeps the upstream release number as the base and appends a local
+build timestamp: `version-name = "<upstream-version>+<%Y%m%d-%H%M%S>"` (e.g.
+`50.0.1+20261017-185627`). The base (`50.0.1`) tracks the upstream tag this
+branch is based on (`v50.0.1`, commit `af20e70`); the timestamp makes every
+local build distinguishable without inventing fork-semver.
+
+- `metadata.json:8` — only place the version lives (`prefs.js` About tab
+  reads `metadata['version-name']` at runtime, `utils.js` uses GNOME's
+  `Config.PACKAGE_VERSION`, not this).
+- Timestamp format matches the settings-export filename convention
+  (`prefs.js:584`, `GLib.DateTime.format('%Y%m%d-%H%M%S')`, local time).
+- Bump procedure: set `version-name` to `<upstream-version>+$(date +%Y%m%d-%H%M%S)`
+  when a new local build/release is made. No Makefile automation — the file
+  is tracked and stays clean between bumps.
+
 ## Kill-switches & rollback
 
 
