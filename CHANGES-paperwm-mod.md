@@ -1,11 +1,11 @@
 # paperwm-mod — Branch Changes
 
-**Branch:** `durjan/paperwm-mod` (HEAD `940b2da`)
+**Branch:** `durjan/paperwm-mod` (HEAD `eeba63d`)
 **Base:** `origin/release` / `release` at `8bf6dd2` (“Update README.md”)
-**Date covered:** 2026-10-01 → 2026-10-14
+**Date covered:** 2026-10-01 → 2026-10-17
 **Range command:** `git log 8bf6dd2..HEAD --reverse --stat` / `git diff 8bf6dd2..HEAD --stat`
-**Commits on branch:** 14 (all by `durjan`)
-**Diff size:** `15 files changed, 1402 insertions(+), 150 deletions(-)` (plus `gschemas.compiled` regen)
+**Commits on branch:** 38 (all by `durjan`)
+**Diff size:** `33 files changed, 5555 insertions(+), 250 deletions(-)` (plus `gschemas.compiled` regen)
 
 > This file is the branch changelog. Upstream user docs remain in `README.md`.
 > Security review is in `SECURITY_AUDIT.md`.
@@ -46,24 +46,93 @@ Per-commit `--stat` summary:
 - `3820d9a`: `tiling.js` (+108)
 - `940b2da`: `tiling.js` (+90/−54)
 
+### Follow-up commits (`940b2da` → `eeba63d`)
+
+| # | Hash | Date | Subject |
+|---|------|------|---------|
+| 15 | `29bf583` | 2026-10-14 | Suspend center-on-focus while drifting, restore on center-window shortcut |
+| 16 | `05424d8` | 2026-10-14 | Add branch changelog for paperwm-mod |
+| 17 | `466be3b` | 2026-10-14 | Add AGENTS.md agent guide for paperwm-mod |
+| 18 | `53bc6da` | 2026-10-15 | Clear stale taskbar ranks and document Dash-to-Panel split-mode requirement |
+| 19 | `9adb018` | 2026-10-15 | Document required dconf settings for taskbar order sync |
+| 20 | `04fccf1` | 2026-10-15 | Fix new scratch window focus when always-on-top window is active |
+| 21 | `7aadad0` | 2026-10-15 | Add export/import of user settings to About tab |
+| 22 | `b71c4a6` | 2026-10-15 | Add focus-mode-enabled setting to disable focus auto-centering |
+| 23 | `c4aab44` | 2026-10-16 | Fix session crash when opening scratch-layer launchers (e.g. Vicinae) |
+| 24 | `69b5110` | 2026-10-16 | Harden taskbar order sync against stale ranks and missed nudges |
+| 25 | `ab48d52` | 2026-10-16 | Fix settings export/import: file picker path, timestamped .md, robust errors |
+| 26 | `c3512a3` | 2026-10-16 | Force taskbar re-sync after startup burst settles |
+| 27 | `232170c` | 2026-10-17 | Harden scratch layer visibility against throwing sub-steps |
+| 28 | `72986a8` | 2026-10-17 | add bugs.md |
+| 29 | `8363b56` | 2026-10-17 | add tests/ (suite scaffolding + span/focus/wrap/scratch/navigator tests) |
+| 30 | `edc925d` | 2026-10-17 | update agents.md |
+| 31 | `0ed779f` | 2026-10-17 | update gitignore |
+| 32 | `abbe7b3` | 2026-10-17 | update makefile |
+| 33 | `bbba2e8` | 2026-10-17 | agents.md: instruction update |
+| 34 | `e166759` | 2026-10-17 | agents.md: instruction update |
+| 35 | `602a0b9` | 2026-10-17 | fix: make taskbar sync async with debouncing to handle startup window bursts (reverted) |
+| 36 | `b198827` | 2026-10-17 | agents.md: instruction update |
+| 37 | `90fcd31` | 2026-10-17 | Revert `602a0b9` (botched; stray tokens broke `tiling.js`) |
+| 38 | `eeba63d` | 2026-10-17 | fix: move taskbar sync off the main thread into a debounced scheduler |
+
+Per-commit `--stat` (follow-up range):
+
+- `29bf583`: `keybindings.js, tiling.js` (+69/−1)
+- `05424d8`: `CHANGES-paperwm-mod.md` (new, +207)
+- `466be3b`: `AGENTS.md` (new, +45)
+- `53bc6da`: `README.md, CHANGES-paperwm-mod.md, scratch.js, tiling.js` (+24/−2)
+- `9adb018`: `README.md, CHANGES-paperwm-mod.md` (+8/−2)
+- `04fccf1`: `scratch.js, tiling.js` (+23/−1)
+- `7aadad0`: `Settings.ui, prefs.js` (+288)
+- `b71c4a6`: `CHANGES-paperwm-mod.md, Settings.ui, keybindings.js, prefs.js, prefsKeybinding.js, gschemas.compiled, gschema.xml, settings.js, tiling.js` (+198/−17)
+- `c4aab44`: `scratch.js, tiling.js` (+83/−21)
+- `69b5110`: `scratch.js, tiling.js` (+265/−22)
+- `ab48d52`: `prefs.js` (+228/−56)
+- `c3512a3`: `scratch.js, tiling.js` (+53/−8)
+- `232170c`: `scratch.js` (+147/−85)
+- `72986a8`: `bugs/bugs.md` (new, +13)
+- `8363b56`: `tests/` (10 files, +1201)
+- `edc925d`: `AGENTS.md` (+22/−1)
+- `0ed779f`: `.gitignore` (+2)
+- `abbe7b3`: `Makefile` (+8/−1)
+- `bbba2e8`, `e166759`, `b198827`: `AGENTS.md` (instructions)
+- `602a0b9`: `tiling.js` (+117/−64, reverted)
+- `90fcd31`: `tiling.js` (−117/+64, revert)
+- `eeba63d`: `taskbar.js` (new), `tests/taskbar.test.js` (new), `tiling.js`, `tests/tiling-taskbar.test.js`, `tests/run.js` (+1834/−456)
+
+Behavioral follow-ups after `940b2da` — beyond the taskbar rework in §14 — are:
+the drift/focus interaction (`29bf583`), taskbar hardening (`53bc6da`,
+`69b5110`, `c3512a3`; reworked into `taskbar.js` by §14), scratch focus/crash/
+visibility fixes (`04fccf1`, `c4aab44`, `232170c`), settings export/import
+(`7aadad0` + fix `ab48d52`), and the `focus-mode-enabled` kill-switch
+(`b71c4a6`). `git show <hash>` remains the source of truth for their details.
+
 ## Files touched (vs base)
 
 ```text
+.gitignore
+AGENTS.md                    (new)
+CHANGES-paperwm-mod.md       (new)
 Makefile
-metadata.json
+README.md
 SECURITY_AUDIT.md            (new)
 Settings.ui
+bugs/bugs.md                 (new)
 gestures.js
 keybindings.js
+metadata.json
 navigator.js
 patches.js
 prefs.js
+prefsKeybinding.js
 schemas/gschemas.compiled
 schemas/org.gnome.shell.extensions.paperwm.gschema.xml
 scratch.js
 settings.js
 stackoverlay.js
-tiling.js                    (+1248/−~150, bulk of branch)
+taskbar.js                    (new — §14 scheduler)
+tests/                        (new: harness, mocks, run + 8 suites)
+tiling.js                     (+1534/−~200, bulk of branch)
 ```
 
 ## 1) Rename: `paperwm` → `paperwm-mod` (`fa9628e`)
@@ -155,6 +224,11 @@ Legacy space-wide `DEFAULT → CENTER → EDGE` rotation replaced by a sticky pe
 
 ## 9) Sync taskbar order → Dash-to-Panel (`83e5f75`, `3820d9a`)
 
+> Historical design (first revision). The synchronous stamping/nudging
+> described here was replaced by the `taskbar.js` scheduler in §14
+> (`eeba63d`); the setting, DTP configuration, and dconf requirements below
+> still apply.
+
 Mirrors PaperWM left-to-right order into Dash-to-Panel ungrouped icons/previews, which natively sort by `get_stable_sequence()` (creation order). Uses DTP’s `window._dtpPosition` override (set by manual icon drags).
 
 - New setting `sync-taskbar-order` (bool, default `false`): `gschema.xml`, `settings.js:65`, `prefs.js:479` (`booleanStateChanged`), `Settings.ui:2184` switch (“Sync window order to taskbar (e.g. Dash-to-Panel ungrouped)”), live toggle handler in `tiling.js:265` (on → `syncTaskbarOrder()`, off → `clearTaskbarOrder()`).
@@ -205,10 +279,57 @@ New `focus-mode-enabled` setting (bool, default `true` — existing installs kee
 - Live toggle: `changed::focus-mode-enabled` drops all spaces to DEFAULT on disable (clears `positionMode`/`suspendedFocusMode`, syncs icons, no window move); on enable restores the default mode per space (skipped if a space already holds a cycle position from a late-delivered auto-enable).
 - Toggle key: `toggle-focus-mode-enabled` (default `<Super><Alt>c` — `<Super><Shift>c` stays on the cycle action to avoid a duplicate default; rebind after moving the cycle key if desired).
 
+## 14) Taskbar order sync — asynchronous scheduler (`eeba63d`, `taskbar.js`)
+
+Replaces the synchronous mechanism of §9 (same setting, same DTP
+configuration, same ordering rules) and closes `bugs/bugs.md` §3.2. The
+problem: stamping + nudging ran inline from `Space.layout()`,
+`window-created`, and floating add/remove; during the login autostart burst
+the nudge could reach Dash-to-Panel before DTP finished enabling (or after it
+painted an early snapshot), and the signature gate then suppressed every
+later nudge because the order had not changed — icons stayed missing until
+the next real order change.
+
+- New module `taskbar.js` (`createTaskbarSync(deps)`, no `gi://` imports):
+  every pass is **debounced (50 ms) and idle-deferred** — no taskbar work runs
+  synchronously in a signal handler or layout pass. A window burst collapses
+  into one pass; nudges remain signature-gated; `forceResync()` and the
+  startup chain bypass the gate but are still scheduled.
+- `tiling.js` keeps only the shell wiring (`createLiveTaskbarSync()`:
+  `GLib.timeout_add`, `Utils.later_add(Meta.LaterType.IDLE)`, `AppFavorites`
+  nudge, `global.get_window_actors` sweep for clears) and the historical
+  exports as thin scheduled delegates: `scheduleTaskbarSync()` (new, used by
+  all call sites), `syncTaskbarOrder()`, `forceTaskbarResync()`,
+  `clearTaskbarPosition()`, `clearTaskbarOrder()`, plus
+  `beginTaskbarStartupPhase()` / `endTaskbarStartupPhase()`.
+- **Startup burst cover** (the actual §3.2 fix): `enable()` calls
+  `beginTaskbarStartupPhase()` when `Main.layoutManager._startingUp`. Each
+  natural pass during the phase arms a chain of forced re-asserts at
+  +1 s / +3 s / +8 s (`TaskbarSyncDefaults.startupResyncDelaysMs`); chain
+  steps never re-arm a chain, so each chain is bounded; the phase auto-ends
+  after 30 s (`startupPhaseMs`) and performs one final forced pass — a late-
+  or slow-to-enable DTP converges.
+- Removed `stampProvisionalTaskbarPosition()` and all synchronous stamping
+  from `display::window-created` (a new window may briefly sort by native
+  creation order until the scheduled pass lands).
+- Lifecycle: `disable()` clears ranks then disposes the controller (cancels
+  debounce + chain timers); `enable()` re-creates it; `removePaperWMFlags()`
+  deletes `_dtpPosition` on released windows.
+- Commit history: first attempt `602a0b9` was reverted in `90fcd31` (the
+  aider-generated patch had stray tokens that broke `tiling.js` parsing plus
+  unrelated edits); the reworked implementation is `eeba63d`.
+
+Tests: `tests/taskbar.test.js` (62 cases, plain `gjs`, fake clock) covers
+debounce/deferral, ordering, signature gate, forced passes, clears,
+dispose, startup chains, hostile inputs, and the §3.2 regression scenarios
+(late-enabled panel converges; unchanged-order re-assert at startup; no
+startup chain on a mid-session enable). `tests/tiling-taskbar.test.js` is a
+shell-session wiring smoke test.
+
 ## Kill-switches & rollback
 
 - Span mode: `tiling.js:52` `SPAN_ALL_MONITORS = true → false` restores upstream per-monitor Spaces without reverting other fixes (overview/patches guards are span-conditional).
-- Taskbar sync: `sync-taskbar-order = false` (default) or `clearTaskbarOrder()` on disable — zero effect without a compatible taskbar (only a cheap GNOME Dash refresh via `AppFavorites.changed`).
+- Taskbar sync: `sync-taskbar-order = false` (default) or disable the extension — zero effect without a compatible taskbar, and nothing runs inline (all work is debounced + idle-deferred; the startup chain is bounded by `startupResyncDelaysMs`/`startupPhaseMs` and cancelled on dispose).
 - Focus behavior: set `default-focus-mode = 0` to restore upstream DEFAULT; pressing the legacy focus-mode UI still calls `setFocusMode` (clears `positionMode`). Set `focus-mode-enabled = false` to disable all focus auto-centering (cycle key re-enables and advances once).
 - Wrap: callers in `keybindings.js` pass `wrap=true`; change to `false`/omit to restore clamping.
 

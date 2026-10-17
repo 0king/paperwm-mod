@@ -24,7 +24,7 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 
 - `extension.js` is the entrypoint: `enable()`/`disable()` iterate the module list. Order matters (see file header): `Settings` before consumers, `Settings` before `Patches` for reverse-order disable. `settings.js` must not import other paperwm modules.
 - `imports.js` is the module registry — add new modules there and to the list in `extension.js`.
-- `tiling.js` (~6700 lines) is the core: `Spaces`/`Space`, layout, viewport, focus. Other files are satellites: `keybindings.js`, `navigator.js` (discrete nav + drift snap ordering), `gestures.js` (touchpan), `scratch.js` (floating layer), `patches.js` (monkey-patches), `stackoverlay.js`, `topbar.js`, `workspace.js`, `prefs.js` + `*.ui` (settings UI).
+- `tiling.js` (~6700 lines) is the core: `Spaces`/`Space`, layout, viewport, focus. Other files are satellites: `keybindings.js`, `navigator.js` (discrete nav + drift snap ordering), `gestures.js` (touchpan), `scratch.js` (floating layer), `patches.js` (monkey-patches), `stackoverlay.js`, `topbar.js`, `workspace.js`, `prefs.js` + `*.ui` (settings UI), `taskbar.js` (Dash-to-Panel order-sync scheduler — library module imported directly by `tiling.js`).
 - `config/user.js` is a stub; dynamic user-config loading is disabled (see commented block in `extension.js`).
 
 ## paperwm-mod deltas (see `CHANGES-paperwm-mod.md` — the branch changelog)
@@ -32,7 +32,7 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 - `SPAN_ALL_MONITORS = true` kill-switch in `tiling.js:52`. `false` restores upstream per-monitor Spaces. Span helpers: `getMonitorsBoundingBox`, `computeSpannedWorkArea`, `getPrimaryWorkAreaSpanCoords`, `moveWindowToPrimaryMonitor`. Centering/focus/fullscreen target the **primary** monitor, not the span bounding box (which starts at the leftmost/upper monitor).
 - Focus-mode key no longer rotates space-wide `DEFAULT→CENTER→EDGE`; it cycles per-space `positionMode` (null|0|1|2 = legacy, primary-left/center/right). `setFocusMode` clears `positionMode`; drift and manual touchpan (`gestures.js`) also clear it. `default-focus-mode` now defaults to `1` (CENTER).
 - `Space._drift`/`driftLeft`/`driftRight` (`tiling.js:~1518+`): `driftTimeout` is a single global — never leave `drifting=true` without an active timeout; tick/snap errors must stop drift, not wedge the key grab.
-- Taskbar sync stamps `w._dtpPosition` and nudges via `AppFavorites.changed` (signature-gated); `clearTaskbarOrder()` on disable/setting-off. Gated by `sync-taskbar-order` (default `false`).
+- Taskbar sync (`taskbar.js`, dependency-injected, gi-free): a debounced + idle-deferred scheduler stamps `w._dtpPosition` in PaperWM order and nudges DTP via `AppFavorites.changed` (signature-gated). Never run taskbar work inline from layout/signal handlers — call `scheduleTaskbarSync()`. The login autostart burst is covered by a bounded forced-resync chain (`beginTaskbarStartupPhase()` when `Main.layoutManager._startingUp`). `disable()` clears ranks and disposes the controller. Gated by `sync-taskbar-order` (default `false`).
 - All-monitors ws switch/move wrap at ends (`wrap=true` passed from `keybindings.js`); `select*/move*Space` default `wrap=false`.
 - `patches.js` span guards are null-safe (`spaces?.`, try/catch) — keep that pattern so a missing `Space` never breaks overview rendering.
 
@@ -45,12 +45,13 @@ Test files live under `tests/` and use the `tests/harness.js` framework (`descri
 | `tests/lib.test.js` | `lib.js` pure functions (`findNext`/`findPrev`, `arrayEqual`, `eq`, `swap`, `in_bounds`, `indent`, `sum`, `zip`) | Yes |
 | `tests/tiling-span.test.js` | `SPAN_ALL_MONITORS`, `getMonitorsBoundingBox`, `computeSpannedWorkArea`, `getPrimaryWorkAreaSpanCoords`, `moveWindowToPrimaryMonitor` | No (needs `gi://` + `resource:///`) |
 | `tests/tiling-focus.test.js` | `FocusModes`, `isFocusModeEnabled`, `setFocusModeEnabled`, `getDefaultFocusMode`, `getWindowPositionTargets`, cycle logic | No |
-| `tests/tiling-taskbar.test.js` | `syncTaskbarOrder`, `stampProvisionalTaskbarPosition`, `forceTaskbarResync`, `clearTaskbarPosition`, `clearTaskbarOrder` | No |
+| `tests/tiling-taskbar.test.js` | Shell-session wiring smoke tests: historical taskbar exports exist and never throw; `clearTaskbarPosition` rank deletion | No |
+| `tests/taskbar.test.js` | `taskbar.js` scheduler (plain gjs, fake clock): debounce/deferral, ordering, signature gate, forced passes, clears, dispose, startup burst chains, `bugs/bugs.md` §3.2 regressions | Yes |
 | `tests/tiling-wrap.test.js` | `selectDownSpace`/`selectUpSpace`/`moveDownSpace`/`moveUpSpace` `wrap` param, `selectSequenceSpace` | No |
 | `tests/scratch.test.js` | `makeScratch`/`unmakeScratch` state contract, taskbar-rank cleanup | No |
 | `tests/navigator.test.js` | `primaryModifier` bit isolation | No |
 
-The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and `resource:///org/gnome/shell/...` which only resolve inside a running GNOME Shell. Run them with `make test` inside `./shell.sh` or `nix run .#vm`. `tests/lib.test.js` runs anywhere via `gjs -m tests/lib.test.js` or `make test`.
+The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and `resource:///org/gnome/shell/...` which only resolve inside a running GNOME Shell. Run them with `make test` inside `./shell.sh` or `nix run .#vm`. `tests/lib.test.js` and `tests/taskbar.test.js` run anywhere via `gjs -m tests/run.js` or `make test`.
 
 `tests/mocks.js` provides `MockMonitor`, `MockWindow`, `MockSpace`, `MockSpaces`, `MockSettings`, and `makeGlobalMock()` for building controlled inputs in shell-session tests.
 
