@@ -65,7 +65,7 @@ The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and 
 4. `prefs.js` binding (e.g. `booleanStateChanged`)
 
 ## code edit best practices
-- whenever code changes, document it in a change file.
+- whenever code changes, document it in a change file with your findings in brief (problem, solution).
 - run tests after edits to check regression
 - when a bug is reported, document it in bugs/ with a brief description.
 - ask clarifying questions, dont assume
