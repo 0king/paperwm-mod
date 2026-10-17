@@ -63,4 +63,9 @@ The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and 
 3. `Settings.ui` widget
 4. `prefs.js` binding (e.g. `booleanStateChanged`)
 
+## code edits
+- whenever code changes, document it in a change file.
+- run tests to check regression
+- when a bug is reported, document it in bugs/ with a brief description.
+
 Live-toggle side effects for the running session go in `tiling.js` (see `sync-taskbar-order` handler), not in `prefs.js`.
