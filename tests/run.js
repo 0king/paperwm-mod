@@ -20,6 +20,7 @@ import { describe, it, eq, assert, runAndExit, total, passed, failed, skipped } 
 const testFiles = [
     './lib.test.js',
     './taskbar.test.js',
+    './window-sizes.test.js',
     './tiling-span.test.js',
     './tiling-focus.test.js',
     './tiling-taskbar.test.js',

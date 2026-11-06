@@ -478,6 +478,7 @@ class SettingsWidget {
         booleanStateChanged('maximize-within-tiling');
         booleanStateChanged('topbar-mouse-scroll-enable');
         booleanStateChanged('sync-taskbar-order');
+        booleanStateChanged('remember-window-sizes');
 
         // About
         // build version information

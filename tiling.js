@@ -15,6 +15,7 @@ import { Easer, DispatcherMode } from './utils.js';
 import { ClickOverlay } from './stackoverlay.js';
 import { WorkspaceSettings } from './workspace.js';
 import { createTaskbarSync, createDashToPanelNudge } from './taskbar.js';
+import { createWindowSizeStore, windowSizeKey } from './window-sizes.js';
 
 const { signals: Signals } = imports;
 const workspaceManager = global.workspace_manager;
@@ -223,6 +224,11 @@ let displayConfig;
 let saveState;
 let startupTimeoutId, timerId, fullscreenStartTimeout, stackSlurpTimeout, workspaceChangeTimeouts;
 let monitorChangeTimeout, driftTimeout, driftSpace;
+/**
+ * Per-application tiled size memory (see window-sizes.js). Created in
+ * `enable()` and disposed (flushed) in `disable()`.
+ */
+let windowSizes;
 // Set while the focus-mode cycle key auto-enables focus mode: skips the
 // `changed::focus-mode-enabled` default-restore so the cycle advances once
 // (single move) instead of restoring-then-cycling (double move).
@@ -240,6 +246,22 @@ export function enable(extension) {
     saveState = saveState ?? new SaveState();
 
     gsettings = extension.getSettings();
+    windowSizes = createWindowSizeStore({
+        isEnabled: () => Settings.prefs?.remember_window_sizes !== false,
+        read: () => gsettings.get_string('window-sizes'),
+        write: text => gsettings.set_string('window-sizes', text),
+        setTimeout: (fn, ms) => GLib.timeout_add(GLib.PRIORITY_DEFAULT, ms, () => {
+            fn();
+            return GLib.SOURCE_REMOVE;
+        }),
+        clearTimeout: id => Utils.timeout_remove(id),
+        logError: (...args) => console.error('PaperWM window sizes:', ...args),
+    });
+    try {
+        windowSizes.load();
+    } catch (e) {
+        console.error('PaperWM window sizes:', e);
+    }
     backgroundSettings = new Gio.Settings({
         schema_id: 'org.gnome.desktop.background',
     });
@@ -288,6 +310,10 @@ export function enable(extension) {
         } else {
             clearTaskbarOrder();
         }
+    });
+    gsettings.connect('changed::remember-window-sizes', () => {
+        // WindowSizes.isEnabled() reads the same pref, so layout() / remember()
+        // automatically pick up the toggle on the next window tiled / saved.
     });
     gsettings.connect('changed::focus-mode-enabled', () => {
         if (!spaces) {
@@ -448,6 +474,8 @@ export function disable() {
     // then stop every queued taskbar pass (debounce + startup chain timers).
     clearTaskbarOrder();
     taskbarSync.dispose();
+    windowSizes?.dispose();
+    windowSizes = null;
     spaces.destroy();
     inGrab = null;
     gsettings = null;
@@ -862,16 +890,23 @@ export class Space extends Array {
             }
 
             if (resizable) {
-                const hasNewTarget = mw._targetWidth !== targetWidth || mw._targetHeight !== targetHeight;
-                const targetReached = f.width === targetWidth && f.height === targetHeight;
+                // A remembered size wins on first layout; explicit preferredWidth wins
+                // over both. After consuming a restored height we must not keep
+                // pinning the window like a preferredWidth would.
+                let restoredHeight = targetHeight;
+                if (!mw.preferredWidth && mw._restoreTiledHeight !== undefined) {
+                    restoredHeight = mw._restoreTiledHeight;
+                }
+                const hasNewTarget = mw._targetWidth !== targetWidth || mw._targetHeight !== restoredHeight;
+                const targetReached = f.width === targetWidth && f.height === restoredHeight;
 
                 // Update targets (NB: must happen before resize request)
                 mw._targetWidth = targetWidth;
-                mw._targetHeight = targetHeight;
+                mw._targetHeight = restoredHeight;
 
                 if (!targetReached && hasNewTarget) {
                     // Explanation for `hasNewTarget` check in commit message
-                    mw.move_resize_frame(true, f.x, f.y, targetWidth, targetHeight);
+                    mw.move_resize_frame(true, f.x, f.y, targetWidth, restoredHeight);
                 }
             } else {
                 // Fullscreen (and maximized) windows must live on the primary
@@ -995,6 +1030,13 @@ export class Space extends Array {
         let y0 = workArea.y;
         let fixPointAttempCount = 0;
 
+        // Restored sizes apply only to the first layout after insertion; they
+        // are cleared below so they never pin the window like preferredWidth.
+        const tiledWidthOf = w =>
+            w._restoreTiledWidth ??
+            w._fullscreen_frame?.tiledWidth ??
+            w.get_frame_rect().width;
+
         for (let i = 0; i < this.length; i++) {
             let column = this[i];
             // Actorless windows are trouble. Layout could conceivable run while a window is dying or being born.
@@ -1007,16 +1049,12 @@ export class Space extends Array {
 
             let targetWidth;
             if (selectedInColumn) {
-                // if selected window - use tiledWidth or frame.width (fallback)
-                targetWidth =
-                    selectedInColumn?._fullscreen_frame?.tiledWidth ??
-                    selectedInColumn.get_frame_rect().width;
+                // if selected window - use restored/tiledWidth or frame.width (fallback)
+                targetWidth = tiledWidthOf(selectedInColumn);
             }
             else {
-                // otherwise get max of tiledWith or frame.with (fallback)
-                targetWidth = Math.max(...column.map(w => {
-                    return w?._fullscreen_frame?.tiledWidth ?? w.get_frame_rect().width;
-                }));
+                // otherwise get max of restored/tiledWith or frame.with (fallback)
+                targetWidth = Math.max(...column.map(tiledWidthOf));
             }
 
             // enforce minimum
@@ -1047,6 +1085,13 @@ export class Space extends Array {
 
             x += resultingWidth + gap;
         }
+        // One-shot restore values were consumed by the loop above. Leaving
+        // them set would behave like a permanent preferredWidth and block
+        // later user resizes.
+        this.getWindows().forEach(w => {
+            delete w._restoreTiledWidth;
+            delete w._restoreTiledHeight;
+        });
         // final gap add - required to resolve https://github.com/paperwm/PaperWM/issues/684
         x += gap;
 
@@ -1108,6 +1153,7 @@ export class Space extends Array {
         // save the last size frame (for use in restoring)
         this.getWindows().forEach(w => {
             w._last_layout_frame = w.get_frame_rect();
+            rememberTiledWindowSize(w);
         });
 
         // Mirror spatial order into `window._dtpPosition` for Dash-to-Panel
@@ -1236,6 +1282,11 @@ export class Space extends Array {
             this.selectedWindow = metaWindow;
         if (this.indexOf(metaWindow) !== -1)
             return false;
+
+        // Apply the application's last tiled size on this window's first
+        // layout. The values are consumed (and cleared) by layout(); they must
+        // not pin the window like a preferredWidth winprop would.
+        queueWindowSizeRestore(metaWindow);
 
         if (row !== undefined && this[index]) {
             let column = this[index];
@@ -4336,9 +4387,55 @@ export function removePaperWMFlags(w) {
     delete w._fullscreen_lock;
     delete w._fullscreen_above;
     delete w._last_layout_frame;
+    delete w._restoreTiledWidth;
+    delete w._restoreTiledHeight;
     // Released windows keep no PaperWM taskbar rank (Dash-to-Panel would
     // otherwise sort the native window by a stale override).
     delete w._dtpPosition;
+}
+
+export function rememberTiledWindowSize(metaWindow) {
+    if (!windowSizes || !metaWindow) {
+        return;
+    }
+    const key = windowSizeKey(metaWindow);
+    const f = metaWindow.get_frame_rect();
+    if (!key || f.width < 50 || f.height < 50) {
+        return;
+    }
+    windowSizes.remember(key, f.width, f.height);
+}
+
+/**
+ * Queue a restored size for `metaWindow` so its first layout uses the
+ * application's last tiled width (and height) instead of its current frame.
+ *
+ * Called from `Space.addWindow()`. The remembered values are consumed once by
+ * `layout()`'s `tiledWidthOf`/`tiledHeightOf` below and then deleted — they
+ * never pin the window like an explicit preferredWidth winprop.
+ *
+ * @param {Meta.Window} metaWindow
+ */
+export function queueWindowSizeRestore(metaWindow) {
+    if (!windowSizes || !metaWindow) {
+        return;
+    }
+    const key = windowSizeKey(metaWindow);
+    if (!key) {
+        return;
+    }
+    const size = windowSizes.get(key);
+    if (!size) {
+        return;
+    }
+    metaWindow._restoreTiledWidth = size.width;
+    metaWindow._restoreTiledHeight = size.height;
+}
+
+function tiledHeightOf(w) {
+    return w._restoreTiledHeight ??
+        w._fullscreen_frame?.tiledHeight ??
+        w.get_frame_rect().height;
 }
 
 export function addPositionHandler(metaWindow) {
@@ -4380,6 +4477,14 @@ export function resizeHandler(metaWindow) {
         return;
 
     const space = spaces.spaceOfWindow(metaWindow);
+    if (Navigator.navigating) {
+        Navigator.getNavigator().minimaps.forEach(m => typeof m !== 'number' && m.reset());
+    }
+
+    if (inGrab && inGrab.window === metaWindow)
+        return;
+
+    const space = spaces.spaceOfWindow(metaWindow);
     if (!space) {
         return;
     }
@@ -4387,6 +4492,9 @@ export function resizeHandler(metaWindow) {
     const f = metaWindow.get_frame_rect();
     metaWindow._targetWidth = null;
     metaWindow._targetHeight = null;
+    // A user-driven resize invalidates any leftover restore value on this window.
+    delete metaWindow._restoreTiledWidth;
+    delete metaWindow._restoreTiledHeight;
 
     if (space.indexOf(metaWindow) === -1) {
         nonTiledSizeHandler(metaWindow);
@@ -6341,9 +6449,7 @@ export function allocateDefault(column, availableHeight, selectedWindow) {
         const gap = Settings.prefs.window_gap;
         const minHeight = 50;
 
-        const heightOf = mw => {
-            return mw._targetHeight || mw.get_frame_rect().height;
-        };
+        const heightOf = mw => tiledHeightOf(mw);
 
         const k = selectedWindow && column.indexOf(selectedWindow);
         const selectedHeight = selectedWindow && heightOf(selectedWindow);

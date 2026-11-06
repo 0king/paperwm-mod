@@ -735,6 +735,12 @@
         <description>When enabled, PaperWM mirrors its left-to-right window order into the window sort key used by Dash-to-Panel (ungrouped taskbar icons and window previews), so the panel follows the tiling order instead of window creation order. Has no effect without a compatible taskbar.</description>
     </key>
 
+    <key type="b" name="remember-window-sizes">
+        <default>true</default>
+        <summary>Remember each application's last tiled window size across restarts</summary>
+        <description>When enabled, PaperWM records the last tiled width and height per application (GTK/sandbox app id, falling back to WM class) and applies them the first time a window of that application is tiled after a GNOME Shell or session restart. Explicit winprop preferredWidth values take precedence.</description>
+    </key>
+
     <key type="d" name="animation-time">
         <default>0.25</default>
         <summary>Duration of animations in seconds</summary>
@@ -768,6 +774,12 @@
     <key type="as" name="winprops">
         <default><![CDATA[[]]]></default>
         <summary>Array of winprops as (JSON) string objects</summary>
+    </key>
+
+    <key type="s" name="window-sizes">
+        <default>''</default>
+        <summary>Remembered per-application window sizes (internal JSON state)</summary>
+        <description>Internal storage for remember-window-sizes: a JSON map of application identity to {width, height, updated}. Written by PaperWM at runtime; not intended for manual editing.</description>
     </key>
 
     <key type="b" name="gesture-enabled">

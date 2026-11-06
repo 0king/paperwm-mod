@@ -139,6 +139,8 @@ You can scroll the tiling by swiping the trackpad horizontally with three finger
 | <kbd>Super</kbd><kbd>t</kbd>                                                                      | Take window(s) dropping when finished navigating |
 | _Not set by default (set in extension settings)_                                                  | Activate the window under mouse cursor |
 
+
+
 ### The workspace stack & monitors ###
 
 Pressing <kbd>Super</kbd><kbd>Above_Tab</kbd> will slide the active workspace down revealing the stack as shown in the above screenshot. You can then flip through the most recently used workspaces with repeated <kbd>Above_Tab</kbd> presses while holding <kbd>Super</kbd> down. <kbd>Above_Tab</kbd> is the key above <kbd>Tab</kbd> (<kbd>\`</kbd> in a US qwerty layout). Like alt-tab <kbd>Shift</kbd> is added to move in reverse order:

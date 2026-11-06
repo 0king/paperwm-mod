@@ -265,6 +265,8 @@ Mirrors PaperWM left-to-right order into Dash-to-Panel ungrouped icons/previews,
 |-----|------|---------------------|----|
 | `default-focus-mode` | `i` | `0 → 1` (DEFAULT → CENTER) | existing “Default focus mode” row |
 | `sync-taskbar-order` | `b` (new) | `false` | new `Settings.ui` switch + `prefs.js` binding |
+| `remember-window-sizes` | `b` (new) | `true` | new `Settings.ui` switch + `prefs.js` binding |
+| `window-sizes` | `s` (new) | `''` | internal JSON state — not exposed in UI |
 | `focus-mode-enabled` | `b` (new) | `true` | new “Enable window focus mode” switch + `prefs.js` binding |
 | `toggle-focus-mode-enabled` (keybindings) | `as` (new) | `['<Super><Alt>c']` | keybindings prefs row (`prefsKeybinding.js`) |
 
@@ -436,11 +438,13 @@ release zip. See `bugs/bugs.md` §3.4 and the warning in `AGENTS.md`.
 
 ## Kill-switches & rollback
 
-
 - Span mode: `tiling.js:52` `SPAN_ALL_MONITORS = true → false` restores upstream per-monitor Spaces without reverting other fixes (overview/patches guards are span-conditional).
 - Taskbar sync: `sync-taskbar-order = false` (default) or disable the extension — zero effect without a compatible taskbar, and nothing runs inline (all work is debounced + idle-deferred; the startup chain is bounded by `startupResyncDelaysMs`/`startupPhaseMs` and cancelled on dispose).
 - Focus behavior: set `default-focus-mode = 0` to restore upstream DEFAULT; pressing the legacy focus-mode UI still calls `setFocusMode` (clears `positionMode`). Set `focus-mode-enabled = false` to disable all focus auto-centering (cycle key re-enables and advances once).
 - Wrap: callers in `keybindings.js` pass `wrap=true`; change to `false`/omit to restore clamping.
+- Window-size memory: set `remember-window-sizes = false` — `createWindowSizeStore().isEnabled()` returns false, so no sizes are remembered or restored (the keybindings table is unchanged).
+  - `window-sizes.js`: `createWindowSizeStore()` — debounced, LRU-bounded (128 entries), versioned JSON state persisted via GSettings (`window-sizes` key); tolerates corrupt/cross-version state; swallows read/write errors.
+  - `tiling.js`: `Space.addWindow()` queues `windowSizeKey(metaWindow)`'s remembered size once per layout; `layout()` consumes then deletes `_restoreTiledWidth/Height` so a restore never pins the window like a `preferredWidth` winprop; `resizeHandler()` clears leftover restore values on user-driven resize; `Space.layout()`/`allocateDefault()` honor restored heights for vertically-tiled windows; `disable()` disposes (flushes) the store.
 
 ## Verification (reproduce this doc)
 

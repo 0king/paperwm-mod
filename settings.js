@@ -63,6 +63,7 @@ export function enable(extension) {
         'show-open-position-icon',
         'topbar-mouse-scroll-enable',
         'sync-taskbar-order',
+        'remember-window-sizes',
         'disable-topbar-styling',
         'default-focus-mode',
         'focus-mode-enabled',
@@ -115,6 +116,7 @@ export function disable() {
     _overriddingConflicts = null;
     prefs = null;
     conflictSettings = null;
+    windowSizes = null;
 }
 
 export function setState($, key) {

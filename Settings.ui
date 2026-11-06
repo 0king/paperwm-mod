@@ -2262,6 +2262,43 @@
                         <child>
                           <object class="GtkGrid">
                             <property name="focusable">False</property>
+                            <property name="tooltip_text" translatable="yes">Restores each application's last tiled width and height when its windows are reopened after a GNOME Shell or session restart. Explicit preferredWidth winprops still take precedence.</property>
+                            <property name="margin_start">12</property>
+                            <property name="margin_end">12</property>
+                            <property name="margin_top">6</property>
+                            <property name="margin_bottom">6</property>
+                            <property name="column_spacing">32</property>
+                            <child>
+                              <object class="GtkLabel">
+                                <property name="focusable">False</property>
+                                <property name="hexpand">1</property>
+                                <property name="label" translatable="yes">Remember window sizes across restarts</property>
+                                <property name="xalign">0</property>
+                                <layout>
+                                  <property name="column">0</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                            <child>
+                              <object class="GtkSwitch" id="remember-window-sizes">
+                                <layout>
+                                  <property name="column">1</property>
+                                  <property name="row">0</property>
+                                </layout>
+                              </object>
+                            </child>
+                          </object>
+                        </child>
+                      </object>
+                    </child>
+                    <child>
+                      <object class="GtkListBoxRow">
+                        <property name="activatable">False</property>
+                        <property name="focusable">False</property>
+                        <child>
+                          <object class="GtkGrid">
+                            <property name="focusable">False</property>
                             <property name="margin_start">12</property>
                             <property name="margin_end">12</property>
                             <property name="margin_top">6</property>
