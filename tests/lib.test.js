@@ -159,6 +159,92 @@ describe('Lib.sum', () => {
     });
 });
 
+describe('Lib.computeSpanWorkArea', () => {
+    // Two 1920x1080 monitors side by side (GNOME Shell: 3840x1080 span).
+    const bb = { x: 0, y: 0, width: 3840, height: 1080 };
+    const primary = { x: 0, y: 0, width: 1920, height: 1080 };
+    const secondary = { x: 1920, y: 0, width: 1920, height: 1080 };
+
+    it('reserves a bottom panel on one monitor (Dash-to-Panel bottom)', () => {
+        const wa = Lib.computeSpanWorkArea(bb, [
+            { x: 0, y: 0, width: 1920, height: 1032 },
+            secondary,
+        ], 3, 2);
+        eq(wa.x, 0);
+        eq(wa.y, 3);
+        eq(wa.height, 1027); // 1032 - 3 - 2
+        assert(wa.y + wa.height <= 1032);
+    });
+
+    it('reserves a top panel on one monitor (Dash-to-Panel top)', () => {
+        const wa = Lib.computeSpanWorkArea(bb, [
+            { x: 0, y: 48, width: 1920, height: 1032 },
+            secondary,
+        ], 3, 2);
+        eq(wa.y, 51); // 48 + vertical margin
+        eq(wa.height, 1027);
+        assert(wa.y >= 48);
+    });
+
+    it('reserves GNOME top bar plus a bottom panel together', () => {
+        const wa = Lib.computeSpanWorkArea(bb, [
+            { x: 0, y: 24, width: 1920, height: 1008 },
+            secondary,
+        ], 3, 2);
+        eq(wa.y, 27);
+        eq(wa.height, 1003);
+        assert(wa.y >= 24);
+        assert(wa.y + wa.height <= 1032);
+    });
+
+    it('uses the shortest band for side-by-side monitors of different heights', () => {
+        const tall = { x: 0, y: 0, width: 3840, height: 1440 };
+        const wa = Lib.computeSpanWorkArea(tall, [
+            primary,
+            { x: 1920, y: 0, width: 1920, height: 1440 },
+        ], 3, 2);
+        eq(wa.y, 3);
+        eq(wa.height, 1075); // 1080 - 3 - 2
+    });
+
+    it('falls back to the vertical union for vertically stacked monitors', () => {
+        const stacked = { x: 0, y: 0, width: 1920, height: 2160 };
+        const wa = Lib.computeSpanWorkArea(stacked, [
+            { x: 0, y: 0, width: 1920, height: 1080 },
+            { x: 0, y: 1080, width: 1920, height: 1080 },
+        ], 3, 2);
+        eq(wa.y, 3);
+        eq(wa.height, 2155); // 2160 - 3 - 2
+    });
+
+    it('converts to bounding-box-relative coordinates', () => {
+        const offsetBox = { x: -1920, y: 100, width: 3840, height: 1080 };
+        const wa = Lib.computeSpanWorkArea(offsetBox, [
+            { x: -1920, y: 100, width: 1920, height: 1080 },
+            { x: 0, y: 148, width: 1920, height: 1032 }, // 48 px top panel
+        ], 3, 2);
+        eq(wa.x, 0);
+        eq(wa.y, 51); // 148 - 100 + 3
+        eq(wa.width, 3840);
+        eq(wa.height, 1027);
+    });
+
+    it('falls back to the bounding box when no monitor has a work area', () => {
+        const wa = Lib.computeSpanWorkArea(bb, [null, undefined], 3, 2);
+        eq(wa.x, 0);
+        eq(wa.y, 3);
+        eq(wa.width, 3840);
+        eq(wa.height, 1075);
+    });
+
+    it('never returns a negative height', () => {
+        const wa = Lib.computeSpanWorkArea(bb, [
+            { x: 0, y: 0, width: 1920, height: 30 },
+        ], 20, 20);
+        eq(wa.height, 0);
+    });
+});
+
 describe('Lib.zip', () => {
     it('zips two arrays pairwise', () => {
         eq(Lib.zip([1, 2], ['a', 'b']), [[1, 'a'], [2, 'b']]);

@@ -4,7 +4,7 @@
  * Covers:
  *   - SPAN_ALL_MONITORS kill-switch constant
  *   - getMonitorsBoundingBox() — union rect of all monitors
- *   - computeSpannedWorkArea() — union workArea in span coords
+ *   - computeSpannedWorkArea() — work-area union with intersecting vertical bands
  *   - getPrimaryWorkAreaSpanCoords() — primary workArea in span coords
  *   - moveWindowToPrimaryMonitor() — fullscreen→primary guard
  *
@@ -20,6 +20,7 @@ import {
     describe, it, eq, assert, approx, runAndExit
 } from './harness.js';
 import * as Tiling from '../tiling.js';
+import { prefs } from '../settings.js';
 import { MockMonitor, MockSettings } from './mocks.js';
 
 const SPAN_ALL_MONITORS = Tiling.SPAN_ALL_MONITORS;
@@ -77,6 +78,94 @@ describe('computeSpannedWorkArea()', () => {
         const wa = computeSpannedWorkArea();
         // y should be at least vertical_margin (0 by default here)
         assert(wa.y >= 0);
+    });
+});
+
+describe('computeSpannedWorkArea() — panel insets (bugs/bugs.md §3.3)', () => {
+    const mon0 = new MockMonitor(0, 0, 0, 1920, 1080, true);
+    const mon1 = new MockMonitor(1, 1920, 0, 1920, 1080);
+    const monitors = [mon0, mon1];
+
+    const workAreas = areas => index => areas[index] ?? null;
+    const margins = () => ({
+        top: prefs?.vertical_margin ?? 0,
+        bottom: prefs?.vertical_margin_bottom ?? 0,
+    });
+
+    it('reserves a bottom panel on one monitor of a side-by-side span', () => {
+        // Dash-to-Panel bottom on the primary (48 px), secondary unobstructed.
+        const wa = computeSpannedWorkArea(monitors, workAreas([
+            { x: 0, y: 0, width: 1920, height: 1032 },
+            { x: 1920, y: 0, width: 1920, height: 1080 },
+        ]));
+        const { top, bottom } = margins();
+        eq(wa.x, 0);
+        eq(wa.y, top);
+        // Must stay above the primary monitor's bottom panel, even though the
+        // secondary work area reaches the bottom of the screen.
+        assert(wa.y + wa.height <= 1032 - bottom,
+            `strip bottom ${wa.y + wa.height} crosses the bottom panel at 1032`);
+    });
+
+    it('reserves a top panel on one monitor of a side-by-side span', () => {
+        const wa = computeSpannedWorkArea(monitors, workAreas([
+            { x: 0, y: 48, width: 1920, height: 1032 },
+            { x: 1920, y: 0, width: 1920, height: 1080 },
+        ]));
+        const { top } = margins();
+        eq(wa.y, 48 + top);
+        // Intersection of the two vertical bands: 48..1080.
+        assert(wa.y + wa.height <= 1080, 'strip must not reach into the top panel');
+    });
+
+    it('reserves GNOME top bar plus a bottom Dash-to-Panel together', () => {
+        const wa = computeSpannedWorkArea(monitors, workAreas([
+            { x: 0, y: 24, width: 1920, height: 1008 },
+            { x: 1920, y: 0, width: 1920, height: 1080 },
+        ]));
+        const { top, bottom } = margins();
+        eq(wa.y, 24 + top);
+        assert(wa.y + wa.height <= 1032 - bottom,
+            'strip must fit between the top bar and the bottom panel');
+    });
+
+    it('uses the shortest monitor band (no off-screen bottom on a shorter monitor)', () => {
+        const mixed = [
+            new MockMonitor(0, 0, 0, 1920, 1080, true),
+            new MockMonitor(1, 1920, 0, 1920, 1440),
+        ];
+        const wa = computeSpannedWorkArea(mixed, workAreas([
+            { x: 0, y: 0, width: 1920, height: 1080 },
+            { x: 1920, y: 0, width: 1920, height: 1440 },
+        ]));
+        const { top, bottom } = margins();
+        eq(wa.y, top);
+        eq(wa.height, 1080 - top - bottom);
+    });
+
+    it('falls back to the union for vertically stacked monitors', () => {
+        // No common vertical band exists (0..1080 vs 1080..2160), so return
+        // the union instead of an empty area - legacy span behaviour.
+        const stacked = [
+            new MockMonitor(0, 0, 0, 1920, 1080, true),
+            new MockMonitor(1, 0, 1080, 1920, 1080),
+        ];
+        const wa = computeSpannedWorkArea(stacked, workAreas([
+            { x: 0, y: 0, width: 1920, height: 1080 },
+            { x: 0, y: 1080, width: 1920, height: 1080 },
+        ]));
+        const { top, bottom } = margins();
+        eq(wa.y, top);
+        eq(wa.height, 2160 - top - bottom);
+    });
+
+    it('ignores monitors with no work area and never returns negative height', () => {
+        const wa = computeSpannedWorkArea(monitors, workAreas([
+            { x: 0, y: 0, width: 1920, height: 1080 },
+            null,
+        ]));
+        assert(wa.height >= 0);
+        assert(wa.width > 0);
     });
 });
 

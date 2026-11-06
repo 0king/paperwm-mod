@@ -50,10 +50,13 @@ export const SlurpInsertPosition = { BOTTOM: 0, TOP: 1, ABOVE: 2, BELOW: 3 };
  * without reverting the rest of the patch.
  */
 export const SPAN_ALL_MONITORS = true;
-export function getMonitorsBoundingBox() {
+export function getMonitorsBoundingBox(
+    monitors = Main.layoutManager.monitors,
+    primaryMonitor = Main.layoutManager.primaryMonitor
+) {
     let minX = Infinity, minY = Infinity;
     let maxRight = -Infinity, maxBottom = -Infinity;
-    for (let m of Main.layoutManager.monitors) {
+    for (let m of monitors) {
         if (m.x < minX) minX = m.x;
         if (m.y < minY) minY = m.y;
         if (m.x + m.width > maxRight) maxRight = m.x + m.width;
@@ -61,9 +64,13 @@ export function getMonitorsBoundingBox() {
     }
     // single monitor fallback / no monitors yet
     if (!Number.isFinite(minX)) {
-        let primary = Main.layoutManager.primaryMonitor;
-        if (primary) {
-            return { x: primary.x, y: primary.y, width: primary.width, height: primary.height };
+        if (primaryMonitor) {
+            return {
+                x: primaryMonitor.x,
+                y: primaryMonitor.y,
+                width: primaryMonitor.width,
+                height: primaryMonitor.height,
+            };
         }
         return { x: 0, y: 0, width: 0, height: 0 };
     }
@@ -71,34 +78,39 @@ export function getMonitorsBoundingBox() {
 }
 
 /**
- * Union of all monitors' workAreas, expressed in span (space) coordinates,
- * i.e. relative to getMonitorsBoundingBox() origin.
+ * Usable area for the span-all-monitors strip, expressed in span (space)
+ * coordinates, i.e. relative to getMonitorsBoundingBox() origin.
+ *
+ * Horizontally this is the union of all workAreas. Vertically it is the
+ * *intersection* of all workAreas when one exists: that keeps the shared
+ * strip inside every monitor's usable band, so a top/bottom panel (GNOME top
+ * bar, Dash-to-Panel, dock) on any monitor cannot be overlapped. With
+ * vertically stacked monitors there may be no common band; fall back to the
+ * union rather than returning an empty area (the strip is horizontal, so no
+ * single vertical band can avoid every panel there).
+ *
+ * Applies vertical_margin / vertical_margin_bottom.
+ *
+ * @param {Array<object>} [monitors] Monitor list (defaults to the shell's).
+ * @param {(index: number) => object|null} [getWorkArea] WorkArea accessor.
  */
-export function computeSpannedWorkArea() {
-    const bb = getMonitorsBoundingBox();
-    const vMargin = Settings?.prefs?.vertical_margin ?? 0;
-    const vMarginBottom = Settings?.prefs?.vertical_margin_bottom ?? 0;
-    let minX = Infinity, minY = Infinity;
-    let maxRight = -Infinity, maxBottom = -Infinity;
-    for (let mon of Main.layoutManager.monitors) {
-        const wa = Main.layoutManager.getWorkAreaForMonitor(mon.index);
-        if (!wa) {
-            continue;
+export function computeSpannedWorkArea(
+    monitors = Main.layoutManager.monitors,
+    getWorkArea = index => Main.layoutManager.getWorkAreaForMonitor(index)
+) {
+    const workAreas = [];
+    for (let mon of monitors) {
+        const wa = getWorkArea(mon.index);
+        if (wa) {
+            workAreas.push(wa);
         }
-        if (wa.x < minX) minX = wa.x;
-        if (wa.y < minY) minY = wa.y;
-        if (wa.x + wa.width > maxRight) maxRight = wa.x + wa.width;
-        if (wa.y + wa.height > maxBottom) maxBottom = wa.y + wa.height;
     }
-    if (!Number.isFinite(minX)) {
-        return { x: 0, y: vMargin, width: bb.width, height: Math.max(0, bb.height - vMargin - vMarginBottom) };
-    }
-    return {
-        x: minX - bb.x,
-        y: minY - bb.y + vMargin,
-        width: maxRight - minX,
-        height: maxBottom - minY - vMargin - vMarginBottom,
-    };
+    return Lib.computeSpanWorkArea(
+        getMonitorsBoundingBox(monitors),
+        workAreas,
+        Settings?.prefs?.vertical_margin ?? 0,
+        Settings?.prefs?.vertical_margin_bottom ?? 0
+    );
 }
 
 /**
@@ -758,9 +770,10 @@ export class Space extends Array {
 
     /**
      * Returns current workArea parameters for this space.
-     * In span mode this is the union of all monitors' workAreas
-     * (expressed in span/space coordinates). Use
-     * getPrimaryWorkAreaSpanCoords() when you need the primary
+     * In span mode this is the horizontal union of all monitors'
+     * workAreas with their vertical bands intersected (see
+     * computeSpannedWorkArea), expressed in span/space coordinates.
+     * Use getPrimaryWorkAreaSpanCoords() when you need the primary
      * monitor's area (e.g. centering in focus CENTER mode).
      * @returns object with x, y, width, and height values for this WorkArea.
      */

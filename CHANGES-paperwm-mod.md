@@ -155,14 +155,14 @@ export const SPAN_ALL_MONITORS = true; // set false to revert to upstream layout
 New helpers (`tiling.js:53-160`):
 
 - `getMonitorsBoundingBox()` — union rect of all `Main.layoutManager.monitors`.
-- `computeSpannedWorkArea()` — union of all monitor work-areas in span/space coords (applies `vertical_margin` / `vertical_margin_bottom`).
+- `computeSpannedWorkArea()` — work-area union in span/space coords (applies `vertical_margin` / `vertical_margin_bottom`); updated in §17 to intersect vertical bands so monitor panels are respected.
 - `getPrimaryWorkAreaSpanCoords()` — primary monitor work-area in span coords; used for centering/focus so windows land on primary, not on the bezel.
 - `moveWindowToPrimaryMonitor(metaWindow)` — `move_to_monitor(primary.index)` if needed; used by fullscreen paths.
 
 Span-aware rework throughout `tiling.js`:
 
 - `Spaces`: `this.spanAllMonitors = SPAN_ALL_MONITORS` (`tiling.js:2651`); single-space init/switch/monitor-update paths guarded (only `minimum` workspaces needed, not one per monitor).
-- `Space.workArea()` (`tiling.js:688`): returns spanned union in span mode.
+- `Space.workArea()` (`tiling.js:688`): returns the spanned work area in span mode (vertical band intersection since §17).
 - `Space.layout()`, `addWindow`, `isPlaceable`, `showWindow`, `takeWindow`, `centerWindow`, `ensuredX`/`ensureViewport`, grab Y origins, clone-container centering: all branch on `spaces?.spanAllMonitors` and use bounding-box origin (`bb.x/bb.y`) instead of `space.monitor.x/y`.
 - Fullscreen/maximized placement uses primary-monitor origin, not bounding-box origin (which is the secondary monitor when it sits left/above primary).
 - `stackoverlay.js:60` (`multimonitorSupport`): per-monitor `clickOverlay` activation disabled in span mode.
@@ -387,6 +387,52 @@ local build distinguishable without inventing fork-semver.
 - Bump procedure: set `version-name` to `<upstream-version>+$(date +%Y%m%d-%H%M%S)`
   when a new local build/release is made. No Makefile automation — the file
   is tracked and stays clean between bumps.
+
+## 17) Respect per-monitor panels / top bar in span mode
+
+**Problem (bugs/bugs.md §3.3):** with Dash-to-Panel at the top or bottom of
+the primary monitor, tiled windows overlapped it. `computeSpannedWorkArea()`
+took the *union* of every monitor's work area: the secondary monitor (no
+panel) reached the full screen edge, so the union discarded the primary's
+top/bottom inset. The same happened with the stock GNOME top bar kept next to
+a bottom Dash-to-Panel. `getWorkAreaForMonitor()` itself was correct — the
+span computation threw the inset away.
+
+**Fix:** `computeSpannedWorkArea()` now unions work areas horizontally but
+uses the **intersection of every monitor's vertical work-area band** when one
+exists (`top = max(wa.y)`, `bottom = min(wa.y + wa.height)`). The shared span
+strip therefore stays inside the usable band of every monitor, so a panel on
+any monitor cannot be overlapped. With vertically stacked monitors there may
+be no common band (e.g. 0..1080 above 1080..2160); it falls back to the
+previous union instead of returning an empty area. Height is clamped at 0.
+`getMonitorsBoundingBox()` / `computeSpannedWorkArea()` gained optional
+`monitors` / `getWorkArea` arguments so the band logic is unit-testable
+without touching the live shell.
+
+Trade-off: on a side-by-side span where only one monitor has a panel, the
+panel-height band is also left free on the other monitor. A single vertical
+band is shared by every column (windows can scroll across monitors), so this
+is the only layout-safe option without per-column monitor-aware relayout.
+
+**Tests:** `tests/lib.test.js` (plain gjs) — `Lib.computeSpanWorkArea()`:
+bottom panel, top panel, top bar + bottom panel, mixed monitor heights,
+vertically stacked fallback, bounding-box-relative coords, missing work
+areas, zero-height clamp. `tests/tiling-span.test.js` (shell session) —
+integration through the live `Main.layoutManager` accessors with mocked
+monitors/work areas for the same cases.
+
+## 18) Tooling hazard: `gnome-extensions install --force` vs. the dev symlink
+
+`make release` is safe (it only runs `zip`). The destructive step is
+`gnome-extensions install --force paperwm-mod@paperwm.github.com.zip` while
+the installed extension is the `make install` symlink. GNOME Shell 50.1's
+tool follows the symlink into the repo, deletes the target's contents
+(including `.git`), then aborts with `Can't recursively copy directory`; the
+next shell start fails with `Missing metadata.json`. This happened on
+2026-11-06 and wiped most of the checkout (recovered from
+`https://github.com/0king/paperwm-mod`, branch `durjan/paperwm-mod`, plus the
+local working-tree edits). Use a VM or a non-symlinked install to test the
+release zip. See `bugs/bugs.md` §3.4 and the warning in `AGENTS.md`.
 
 ## Kill-switches & rollback
 

@@ -88,3 +88,62 @@ export function zip(...as) {
     }
     return r;
 }
+
+/**
+ * Compute the usable rectangle for a horizontal strip spanning several
+ * monitors, relative to `boundingBox` origin.
+ *
+ * Horizontally the strip is the union of `workAreas`. Vertically it is their
+ * intersection when one exists, so a top/bottom panel or dock on any monitor
+ * is never overlapped. When the monitors have no common vertical band (e.g.
+ * vertically stacked outputs), the union is used instead of returning an
+ * empty area; a horizontal strip cannot avoid every panel in that layout.
+ *
+ * @param {{x: number, y: number, width: number, height: number}} boundingBox
+ *   Bounding box of all monitors, in stage coordinates.
+ * @param {Array<{x: number, y: number, width: number, height: number}>} workAreas
+ *   Per-monitor work areas, in stage coordinates. Missing entries are ignored.
+ * @param {number} [verticalMargin=0]
+ * @param {number} [verticalMarginBottom=0]
+ * @returns {{x: number, y: number, width: number, height: number}}
+ */
+export function computeSpanWorkArea(
+    boundingBox,
+    workAreas,
+    verticalMargin = 0,
+    verticalMarginBottom = 0
+) {
+    let minX = Infinity, maxRight = -Infinity;
+    let unionTop = Infinity, unionBottom = -Infinity;
+    let commonTop = -Infinity, commonBottom = Infinity;
+    let count = 0;
+    for (let wa of workAreas) {
+        if (!wa) {
+            continue;
+        }
+        count++;
+        if (wa.x < minX) minX = wa.x;
+        if (wa.x + wa.width > maxRight) maxRight = wa.x + wa.width;
+        if (wa.y < unionTop) unionTop = wa.y;
+        if (wa.y + wa.height > unionBottom) unionBottom = wa.y + wa.height;
+        if (wa.y > commonTop) commonTop = wa.y;
+        if (wa.y + wa.height < commonBottom) commonBottom = wa.y + wa.height;
+    }
+    if (count === 0) {
+        return {
+            x: 0,
+            y: verticalMargin,
+            width: boundingBox.width,
+            height: Math.max(0, boundingBox.height - verticalMargin - verticalMarginBottom),
+        };
+    }
+    const hasCommonBand = commonBottom > commonTop;
+    const top = hasCommonBand ? commonTop : unionTop;
+    const bottom = hasCommonBand ? commonBottom : unionBottom;
+    return {
+        x: minX - boundingBox.x,
+        y: top - boundingBox.y + verticalMargin,
+        width: maxRight - minX,
+        height: Math.max(0, bottom - top - verticalMargin - verticalMarginBottom),
+    };
+}
