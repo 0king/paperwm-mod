@@ -11,15 +11,23 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 
 ## Commands
 
-- `make install` — symlink repo into extensions dir, then `gnome-extensions enable paperwm-mod@paperwm.github.com`. Requires Shell restart after first install (logout/login, or Alt-F2 `r` on X11 only).
+- `make install` — symlinks the repo into the extensions dir and prints the enable command (it does not enable by itself; run `gnome-extensions enable paperwm-mod@paperwm.github.com`). Requires a Shell restart after first install or after fixing a load failure (logout/login on Wayland, or Alt-F2 `r` on X11 only).
 - `make uninstall` — refuses unless target symlinks back to `$PWD`.
 - `make release` — builds `paperwm-mod@paperwm.github.com.zip` for EGO review.
 - **Never run `gnome-extensions install --force` while `$(TARGET)` is the dev symlink.** GNOME Shell 50.1's tool follows the symlink, empties the repo (including `.git`), then fails with `Can't recursively copy directory`; the extension then starts failing with `Missing metadata.json`. Test the release zip in a VM or a non-symlinked install instead (see `bugs/bugs.md` §3.4).
 - `make test` — runs the gjs test suite (`tests/run.js`). `tests/lib.test.js` (pure functions) runs anywhere; the `tiling`/`navigator`/`scratch` suites require a GNOME Shell session (`gi://` imports resolve there — run inside `nix run .#vm`; do not use `./shell.sh` on a live profile because it runs `dconf reset -f /` and enables the old `paperwm@…` ID). It also runs `make check-schema` and `make check-syntax` (Node parse check of every root `*.js` module; skipped when Node is missing) so stale schemas and parse errors fail locally instead of at extension load. **Run `make test` after every change; a change is not complete until tests pass.**
 - Schema: see [Schema changes — mandatory](#schema-changes--mandatory). `make test` fails when `schemas/gschemas.compiled` is stale.
 - Lint: ESLint with `.eslintrc.yml` (GNOME GJS profile: 4-space indent, semicolons always, `eqeqeq`, no `==`). No lint script — run `eslint` directly on touched files.
+- Makefile help text: `rich_echo`'s message argument goes through `$(call rich_echo,"LABEL","message")`, so it cannot contain a comma (parsed as a third argument) or an unescaped `(` / `)` (breaks the shell `printf` quoting). Use plain words, or a direct `echo` for punctuation.
 - Tests: `make test` (runner `tests/run.js`, framework `tests/harness.js`). `tests/lib.test.js` runs in plain `gjs`; suites importing `gi://` modules need a shell session. Add a test file under `tests/` for every new behavior or bug fix (see `tests/` for patterns).
 - Branch base is upstream `release`; PRs must target `develop` (bot auto-retargets `release` PRs — `.github/workflows/rebase-pr.yaml`).
+
+## Extension load and reload
+
+- One parse error in any root module prevents the **whole** extension from loading. `gnome-extensions info` can still report `Enabled: Yes` while `State: ERROR`; the real error is in the journal, e.g. `Extension paperwm-mod@…: SyntaxError: redeclaration of const space`.
+- The plain-gjs suites do not import `tiling.js` or other `gi://` modules, so they can pass while the extension cannot load. `make test` runs `make check-syntax` (Node `--input-type=module --check` over every root `*.js`) to catch this before install.
+- On Wayland GNOME Shell 50, a failed module stays cached for the whole session. `ReloadExtension` is advertised by D-Bus introspection but returns `UnknownMethod`; `Alt+F2 r` is X11-only. Fix the file, then logout/login.
+- `make install` / `gnome-extensions enable` does not clear a cached load failure; enabling again in the same session still reports `ERROR`.
 
 ## Schema changes — mandatory
 
@@ -74,6 +82,42 @@ Test files live under `tests/` and use the `tests/harness.js` framework (`descri
 | `tests/navigator.test.js` | `primaryModifier` bit isolation | No |
 
 The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and `resource:///org/gnome/shell/...` which only resolve inside a running GNOME Shell. Run them with `make test` inside `nix run .#vm` (`./shell.sh` is unsafe on a live profile: it resets all dconf with `dconf reset -f /` and uses the old extension ID). `tests/lib.test.js` and `tests/taskbar.test.js` run anywhere via `gjs -m tests/run.js` or `make test`.
+
+### Isolated headless shell check
+
+To verify the extension actually loads before asking for a session restart, run a throwaway headless shell with its own config, data, and dconf:
+
+```bash
+TMP=/tmp/opencode/pwm-shell-test
+mkdir -p "$TMP"/{config,data,runtime,cache}
+mkdir -p "$TMP/data/gnome-shell/extensions"
+ln -s "$PWD" "$TMP/data/gnome-shell/extensions/paperwm-mod@paperwm.github.com"
+
+cat > "$TMP/run.sh" <<'EOF'
+dconf write /org/gnome/shell/enabled-extensions "['paperwm-mod@paperwm.github.com']"
+gnome-shell --headless --wayland --no-x11 --virtual-monitor 1920x1080 &
+SHELL_PID=$!
+sleep 8
+gdbus call --session --dest org.gnome.Shell.Extensions \
+  --object-path /org/gnome/Shell/Extensions \
+  --method org.gnome.Shell.Extensions.ListExtensions
+kill "$SHELL_PID"
+EOF
+
+env XDG_CONFIG_HOME="$TMP/config" \
+    XDG_DATA_HOME="$TMP/data" \
+    XDG_RUNTIME_DIR="$TMP/runtime" \
+    XDG_CACHE_HOME="$TMP/cache" \
+    dbus-run-session -- bash "$TMP/run.sh"
+```
+
+Look for `state: <1.0>` with an empty `error` for the extension.
+
+**Critical:** set the XDG variables on the `dbus-run-session` invocation itself. Exporting them inside the script is too late: `dconf-service` is activated by the bus and inherits the bus environment, so a write lands in the real `~/.config/dconf/user` and can overwrite the user's live `enabled-extensions` list.
+
+- `--nested` no longer exists in GNOME Shell 50.1; `gnome-shell --wayland` tries to become the session display server and fails with `EBUSY` on a live login.
+- If the real dconf list is ever clobbered, restore it from `gnome-extensions list --enabled` on the running shell (session-mode extensions such as `ding`, `snapd-prompting`, and `ubuntu-appindicators` come from the ubuntu mode and need not be in the user key).
+- `./shell.sh` is not safe for this: it runs `dconf reset -f /` and enables the old `paperwm@…` ID.
 
 `tests/mocks.js` provides `MockMonitor`, `MockWindow`, `MockSpace`, `MockSpaces`, `MockSettings`, and `makeGlobalMock()` for building controlled inputs in shell-session tests.
 
