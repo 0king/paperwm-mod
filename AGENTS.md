@@ -16,10 +16,31 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 - `make release` — builds `paperwm-mod@paperwm.github.com.zip` for EGO review.
 - **Never run `gnome-extensions install --force` while `$(TARGET)` is the dev symlink.** GNOME Shell 50.1's tool follows the symlink, empties the repo (including `.git`), then fails with `Can't recursively copy directory`; the extension then starts failing with `Missing metadata.json`. Test the release zip in a VM or a non-symlinked install instead (see `bugs/bugs.md` §3.4).
 - `make test` — runs the gjs test suite (`tests/run.js`). `tests/lib.test.js` (pure functions) runs anywhere; the `tiling`/`navigator`/`scratch` suites require a GNOME Shell session (`gi://` imports resolve there — run inside `./shell.sh` or `nix run .#vm`). **Run `make test` after every change; a change is not complete until tests pass.**
-- Schema: after editing `schemas/org.gnome.shell.extensions.paperwm.gschema.xml`, regenerate with `make -C schemas gschemas.compiled` (i.e. `glib-compile-schemas .`) and **commit the binary** — prior commits do (`4476975`, `83e5f75`).
+- Schema: see [Schema changes — mandatory](#schema-changes--mandatory). `make test` fails when `schemas/gschemas.compiled` is stale.
 - Lint: ESLint with `.eslintrc.yml` (GNOME GJS profile: 4-space indent, semicolons always, `eqeqeq`, no `==`). No lint script — run `eslint` directly on touched files.
 - Tests: `make test` (runner `tests/run.js`, framework `tests/harness.js`). `tests/lib.test.js` runs in plain `gjs`; suites importing `gi://` modules need a shell session. Add a test file under `tests/` for every new behavior or bug fix (see `tests/` for patterns).
 - Branch base is upstream `release`; PRs must target `develop` (bot auto-retargets `release` PRs — `.github/workflows/rebase-pr.yaml`).
+
+## Schema changes — mandatory
+
+`schemas/gschemas.compiled` is a tracked binary and **must always match** `schemas/org.gnome.shell.extensions.paperwm.gschema.xml`. If it is stale, the extension loads the old schema and fails at `enable()` with:
+
+```
+Error: GSettings key <key> not found in schema org.gnome.shell.extensions.paperwm
+```
+
+A stale binary can be committed even when all tests pass, because tests do not load GSettings — that is why `make test` now runs `make check-schema`.
+
+For every schema edit (new/removed/renamed key, changed default/summary/description):
+
+1. Edit `schemas/org.gnome.shell.extensions.paperwm.gschema.xml`.
+2. Regenerate: `make -C schemas gschemas.compiled` (never hand-edit the binary).
+3. Verify the key exists: `gsettings --schemadir schemas list-keys org.gnome.shell.extensions.paperwm | grep <key>`.
+4. Run `make test` — it runs `make check-schema`, which recompiles into a temp dir and fails if the committed binary is stale.
+5. Commit the XML **and** `schemas/gschemas.compiled` in the same commit.
+6. After installing, restart GNOME Shell (logout/login; Alt-F2 `r` is X11-only) — GSettings caches compiled schemas per process.
+
+History: `bugs/bugs.md` §4.1 — `f0c9242` shipped the `remember-window-sizes` key without the binary; fixed in `d81cd5d`.
 
 ## Architecture
 
@@ -58,12 +79,15 @@ The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and 
 
 **Rule: add a test file (or cases to an existing one) under `tests/` for every new behavior or bug fix.** A change is not complete until `make test` passes.
 
-## Adding/changing a setting — all 4 places
+## Adding/changing a setting — all 5 places
 
-1. `schemas/...gschema.xml` (+ recompile binary, commit it)
-2. `settings.js` `prefs` key list in `enable()`
-3. `Settings.ui` widget
-4. `prefs.js` binding (e.g. `booleanStateChanged`)
+1. `schemas/...gschema.xml`
+2. `schemas/gschemas.compiled` — regenerate and commit the binary ([mandatory checklist](#schema-changes--mandatory))
+3. `settings.js` `prefs` key list in `enable()`
+4. `Settings.ui` widget
+5. `prefs.js` binding (e.g. `booleanStateChanged`)
+
+Run `make test` (it includes `make check-schema`) before committing.
 
 ## code edit best practices
 - whenever code changes, document it in CHANGES-paperwm-mod.md with your findings in brief (problem, solution).

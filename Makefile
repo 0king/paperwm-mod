@@ -95,13 +95,26 @@ schemas/gschemas.compiled: $(GSCHEMA_FILES)
 	@$(call rich_echo,"MAKE","$@")
 	@$(MAKE) -C schemas gschemas.compiled
 
+## Verify schemas/gschemas.compiled is current (catches a committed stale binary)
+check-schema:
+	@$(call rich_echo,"CHECK","schemas/gschemas.compiled is current")
+	@tmp=$$(mktemp -d); \
+	trap 'rm -rf "$$tmp"' EXIT; \
+	glib-compile-schemas --targetdir="$$tmp" schemas || exit 1; \
+	if ! cmp -s "$$tmp/gschemas.compiled" schemas/gschemas.compiled; then \
+		echo "ERROR: schemas/gschemas.compiled is stale."; \
+		echo "Run 'make -C schemas gschemas.compiled' and commit the binary."; \
+		exit 1; \
+	fi
+
 ## Run the paperwm-mod test suite (gjs).
 ## lib.test.js (pure functions) runs anywhere; the tiling/navigator/scratch
 ## suites require a GNOME Shell session (gi:// imports resolve there).
-test:
+## Also fails when schemas/gschemas.compiled is stale.
+test: check-schema
 	@$(call rich_echo,"TEST","running gjs test suite")
 	@gjs -m tests/run.js
 
-.PHONY: install uninstall release test
+.PHONY: install uninstall release test check-schema
 
 include lib.mk
