@@ -436,6 +436,30 @@ next shell start fails with `Missing metadata.json`. This happened on
 local working-tree edits). Use a VM or a non-symlinked install to test the
 release zip. See `bugs/bugs.md` §3.4 and the warning in `AGENTS.md`.
 
+## 19) Fatal parse error in `resizeHandler()` (`f0c9242` follow-up)
+
+**Problem:** the window-size-memory commit `f0c9242` inserted the
+`Navigator.navigating` refresh, the `inGrab` guard, and
+`const space = spaces.spaceOfWindow(metaWindow)` **twice** in
+`resizeHandler()` (`tiling.js`). Two `const space` declarations in one
+function scope are a parse-time
+`SyntaxError: redeclaration of const space`, so GNOME Shell refused to load
+the extension and reported `State: ERROR` even though
+`gnome-extensions info` said `Enabled: Yes`. The plain-gjs test suites did
+not import `tiling.js`, so `make test` passed and the error only appeared in
+the journal at extension load.
+
+**Fix:** delete the duplicated block. `resizeHandler()` now has exactly one
+`Navigator.navigating` refresh, one `inGrab` guard, and one `const space`;
+behavior is unchanged.
+
+**Prevention:** new `make check-syntax` target (now a prerequisite of
+`make test`) parses every root `*.js` module with
+`node --input-type=module --check`; it is skipped when Node is unavailable.
+The running shell caches a failed module as ERROR for the session, so a
+logout/login is still required after the file is fixed. See
+`bugs/bugs.md` §4.2.
+
 ## Kill-switches & rollback
 
 - Span mode: `tiling.js:52` `SPAN_ALL_MONITORS = true → false` restores upstream per-monitor Spaces without reverting other fixes (overview/patches guards are span-conditional).

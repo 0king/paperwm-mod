@@ -107,14 +107,32 @@ check-schema:
 		exit 1; \
 	fi
 
+## Parse every extension module without executing it. A syntax error (for
+## example a duplicate `const` from a bad merge) otherwise only surfaces when
+## GNOME Shell tries to load the extension, where it stays cached as ERROR
+## until logout/login. Node is optional; the check is skipped when absent.
+check-syntax:
+	@$(call rich_echo,"CHECK","JS syntax - $(words $(JS_FILES)) modules")
+	@if command -v node >/dev/null 2>&1; then \
+		for f in $(JS_FILES); do \
+			node --input-type=module --check < "$$f" || { \
+				echo "ERROR: syntax error in $$f"; \
+				exit 1; \
+			}; \
+		done; \
+	else \
+		echo "node not found; skipping JS syntax check"; \
+	fi
+
 ## Run the paperwm-mod test suite (gjs).
 ## lib.test.js (pure functions) runs anywhere; the tiling/navigator/scratch
 ## suites require a GNOME Shell session (gi:// imports resolve there).
-## Also fails when schemas/gschemas.compiled is stale.
-test: check-schema
+## Also fails when schemas/gschemas.compiled is stale or a module has a
+## syntax error.
+test: check-schema check-syntax
 	@$(call rich_echo,"TEST","running gjs test suite")
 	@gjs -m tests/run.js
 
-.PHONY: install uninstall release test check-schema
+.PHONY: install uninstall release test check-schema check-syntax
 
 include lib.mk

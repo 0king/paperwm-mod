@@ -15,7 +15,7 @@ Supported shells: 45–50 (`metadata.json`). No TS, no build step besides schema
 - `make uninstall` — refuses unless target symlinks back to `$PWD`.
 - `make release` — builds `paperwm-mod@paperwm.github.com.zip` for EGO review.
 - **Never run `gnome-extensions install --force` while `$(TARGET)` is the dev symlink.** GNOME Shell 50.1's tool follows the symlink, empties the repo (including `.git`), then fails with `Can't recursively copy directory`; the extension then starts failing with `Missing metadata.json`. Test the release zip in a VM or a non-symlinked install instead (see `bugs/bugs.md` §3.4).
-- `make test` — runs the gjs test suite (`tests/run.js`). `tests/lib.test.js` (pure functions) runs anywhere; the `tiling`/`navigator`/`scratch` suites require a GNOME Shell session (`gi://` imports resolve there — run inside `./shell.sh` or `nix run .#vm`). **Run `make test` after every change; a change is not complete until tests pass.**
+- `make test` — runs the gjs test suite (`tests/run.js`). `tests/lib.test.js` (pure functions) runs anywhere; the `tiling`/`navigator`/`scratch` suites require a GNOME Shell session (`gi://` imports resolve there — run inside `nix run .#vm`; do not use `./shell.sh` on a live profile because it runs `dconf reset -f /` and enables the old `paperwm@…` ID). It also runs `make check-schema` and `make check-syntax` (Node parse check of every root `*.js` module; skipped when Node is missing) so stale schemas and parse errors fail locally instead of at extension load. **Run `make test` after every change; a change is not complete until tests pass.**
 - Schema: see [Schema changes — mandatory](#schema-changes--mandatory). `make test` fails when `schemas/gschemas.compiled` is stale.
 - Lint: ESLint with `.eslintrc.yml` (GNOME GJS profile: 4-space indent, semicolons always, `eqeqeq`, no `==`). No lint script — run `eslint` directly on touched files.
 - Tests: `make test` (runner `tests/run.js`, framework `tests/harness.js`). `tests/lib.test.js` runs in plain `gjs`; suites importing `gi://` modules need a shell session. Add a test file under `tests/` for every new behavior or bug fix (see `tests/` for patterns).
@@ -73,7 +73,7 @@ Test files live under `tests/` and use the `tests/harness.js` framework (`descri
 | `tests/scratch.test.js` | `makeScratch`/`unmakeScratch` state contract, taskbar-rank cleanup, gated (never forced) taskbar re-schedule | No |
 | `tests/navigator.test.js` | `primaryModifier` bit isolation | No |
 
-The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and `resource:///org/gnome/shell/...` which only resolve inside a running GNOME Shell. Run them with `make test` inside `./shell.sh` or `nix run .#vm`. `tests/lib.test.js` and `tests/taskbar.test.js` run anywhere via `gjs -m tests/run.js` or `make test`.
+The gi-dependent suites (`tiling/*`, `scratch`, `navigator`) import `gi://` and `resource:///org/gnome/shell/...` which only resolve inside a running GNOME Shell. Run them with `make test` inside `nix run .#vm` (`./shell.sh` is unsafe on a live profile: it resets all dconf with `dconf reset -f /` and uses the old extension ID). `tests/lib.test.js` and `tests/taskbar.test.js` run anywhere via `gjs -m tests/run.js` or `make test`.
 
 `tests/mocks.js` provides `MockMonitor`, `MockWindow`, `MockSpace`, `MockSpaces`, `MockSettings`, and `makeGlobalMock()` for building controlled inputs in shell-session tests.
 

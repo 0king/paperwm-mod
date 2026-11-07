@@ -4477,14 +4477,6 @@ export function resizeHandler(metaWindow) {
         return;
 
     const space = spaces.spaceOfWindow(metaWindow);
-    if (Navigator.navigating) {
-        Navigator.getNavigator().minimaps.forEach(m => typeof m !== 'number' && m.reset());
-    }
-
-    if (inGrab && inGrab.window === metaWindow)
-        return;
-
-    const space = spaces.spaceOfWindow(metaWindow);
     if (!space) {
         return;
     }
