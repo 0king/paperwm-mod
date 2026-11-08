@@ -116,7 +116,6 @@ export function disable() {
     _overriddingConflicts = null;
     prefs = null;
     conflictSettings = null;
-    windowSizes = null;
 }
 
 export function setState($, key) {
