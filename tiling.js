@@ -5782,6 +5782,15 @@ export function minimizeHandler(metaWindow) {
             delete metaWindow._tiled_on_minimize;
             Utils.later_add(Meta.LaterType.IDLE, () => {
                 Scratch.unmakeScratch(metaWindow);
+                // Force taskbar resync: the window's rank is re-stamped during
+                // unmakeScratch -> insertWindow -> layout, but DTP may hold a
+                // stale snapshot (e.g. from a startup race where DTP painted
+                // before our stamps landed). The signature gate would suppress
+                // a normal nudge because PaperWM's *stamped* order hasn't
+                // changed; we must bypass the gate to ensure DTP re-reads.
+                try {
+                    forceTaskbarResync();
+                } catch (_e) { /* best-effort */ }
             });
         }
     }

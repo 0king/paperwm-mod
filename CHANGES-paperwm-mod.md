@@ -373,7 +373,42 @@ pass queued) and `tests/tiling-taskbar.test.js` (live panels accessor +
 `sync-taskbar-order=true`, the RTT sampler shows no multi-second main-thread
 block during `vicinae open`.
 
-## 16) Version naming: upstream base + local timestamp
+## 16) Minimize/restore forces taskbar resync (bug: order out of sync after unminimize)
+
+**Problem:** when a tiled window is minimized and then restored, the PaperWM
+order and Dash-to-Panel icon order could go out of sync.
+
+Root cause: PaperWM's taskbar scheduler uses a **signature gate** — it only
+nudges DTP when the stamped order *changes*. If DTP painted an early snapshot
+before our stamps landed (startup race), its internal state becomes stale.
+PaperWM's gate sees "my stamped order hasn't changed" and suppresses nudges,
+so DTP never re-reads the ranks.
+
+Scenario:
+1. Startup: PaperWM stamps ranks [W3=0, W2=1, W1=2]
+2. DTP paints early, sees no ranks, falls back to creation order [W3, W1, W2]
+3. Later scheduled nudge fires, but PaperWM's gate compares against its *last
+   stamped* signature [W3, W2, W1] — unchanged → gate suppresses nudge
+4. DTP stays on stale [W3, W1, W2] forever
+5. User minimizes W1 → removed from tiling, rank cleared, DTP re-sorts to [W3, W2]
+6. User restores W1 → re-inserted, rank re-stamped [W3=0, W2=1, W1=2],
+   layout calls `scheduleTaskbarSync()` (gated) → gate still sees [W3, W2, W1]
+   unchanged from last stamp → **suppresses nudge**
+7. DTP remains on stale order
+
+**Fix:** in `minimizeHandler()` (tiling.js), when a tiled window is unminimized,
+call `forceTaskbarResync()` instead of relying on the gated `scheduleTaskbarSync()`.
+`forceTaskbarResync()` bypasses the signature gate (`lastSignature = null`),
+guaranteeing DTP re-reads the ranks.
+
+Change: `tiling.js:5779-5786` — the IDLE callback in the unminimize branch now
+calls `forceTaskbarResync()` after `Scratch.unmakeScratch()`.
+
+**Test:** `tests/taskbar.test.js` — new case "unminimize of a tiled window
+bypasses signature gate and nudges" verifies `forceResync()` nudges even when
+the signature is unchanged from the last nudge.
+
+## 17) Version naming: upstream base + local timestamp
 
 This fork keeps the upstream release number as the base and appends a local
 build timestamp: `version-name = "<upstream-version>+<%Y%m%d-%H%M%S>"` (e.g.

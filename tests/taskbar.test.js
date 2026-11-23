@@ -1154,4 +1154,32 @@ describe('regression: scratch-window open stays gated (bugs/bugs.md §1.1)', () 
     });
 });
 
+describe('regression: unminimize forces resync (bug: minimized+restored window order out of sync)', () => {
+    it('unminimize of a tiled window bypasses signature gate and nudges', () => {
+        // Setup: two tiled windows in correct order
+        const w1 = makeWindow(1);
+        const w2 = makeWindow(2);
+        const windows = [w1, w2];
+        const h = makeSync({ spaces: makeSpaces(makeSpace(0, windows)) });
+        h.sync.schedule();
+        h.clock.advance(50);
+        eq(h.env.nudges, 1); // initial sort
+
+        // Simulate: w2 was minimized (rank cleared, DTP re-sorted to w1-only)
+        // When DTP had stale state, it might not have re-read our stamps
+        delete w2._dtpPosition;
+        // Now DTP internally has [w1] order, but our signature is [w1] (w2 rank gone)
+
+        // Unminimize w2: it re-enters tiling, gets rank 1, layout runs
+        w2._dtpPosition = 1; // simulates layout stamping
+        // The signature is now [w1, w2] but DTP still thinks [w1]
+        // A GATED schedule() would see signature unchanged from last nudge
+        // and suppress the nudge. forceResync() must bypass the gate.
+        h.sync.forceResync();
+        h.clock.advance(50);
+
+        eq(h.env.nudges, 2); // forced nudge fired despite signature gate
+    });
+});
+
 export { FakeClock };
