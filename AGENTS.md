@@ -78,6 +78,7 @@ Test files live under `tests/` and use the `tests/harness.js` framework (`descri
 | `tests/tiling-taskbar.test.js` | Shell-session wiring smoke tests: historical taskbar exports exist and never throw; `clearTaskbarPosition` rank deletion | No |
 | `tests/taskbar.test.js` | `taskbar.js` scheduler (plain gjs, fake clock): debounce/deferral, ordering, signature gate, forced passes, clears, dispose, startup burst chains, DTP nudge targeting, `bugs/bugs.md` §1.1 + §3.2 regressions | Yes |
 | `tests/tiling-wrap.test.js` | `selectDownSpace`/`selectUpSpace`/`moveDownSpace`/`moveUpSpace` `wrap` param, `selectSequenceSpace` | No |
+| `tests/tiling-animation.test.js` | `viewportMoveToX(animate=false)` settles, `moveDone()` snaps stranded x/y but waits for a live transition, `layout()` zero-width abort settles | No |
 | `tests/scratch.test.js` | `makeScratch`/`unmakeScratch` state contract, taskbar-rank cleanup, gated (never forced) taskbar re-schedule | No |
 | `tests/navigator.test.js` | `primaryModifier` bit isolation | No |
 

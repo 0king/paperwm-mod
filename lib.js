@@ -90,6 +90,36 @@ export function zip(...as) {
 }
 
 /**
+ * Resolve the state of an actor coordinate that an animation was supposed to
+ * bring to `target`.
+ *
+ * A live transition means the animation is still in flight, so the caller must
+ * not settle yet: the transition's completion callback owns that job. With no
+ * transition, a value that still differs from `target` is stranded (the
+ * animation was interrupted, its transition was removed without firing
+ * `onComplete`, or the actor never moved), and must be snapped or the actor
+ * can stay off-target forever.
+ *
+ * Pure function, no Clutter dependency, so it is unit-tested in plain gjs.
+ *
+ * @param {number} current   Current coordinate (may be NaN).
+ * @param {number} target    Coordinate the animation should have ended at.
+ * @param {boolean} transitioning  Whether a transition is animating it now.
+ * @param {number} [epsilon=0.5]  Sub-pixel tolerance for "already settled".
+ * @returns {{blocked: boolean, changed: boolean, value: number}} `blocked`
+ *   when a transition is running, otherwise `changed` says whether `value`
+ *   differs meaningfully from `current` and should be assigned.
+ */
+export function settleCoordinate(current, target, transitioning, epsilon = 0.5) {
+    if (transitioning) {
+        return { blocked: true, changed: false, value: current };
+    }
+    // NaN fails every comparison, so it is deliberately reported as changed.
+    const changed = !(Math.abs(current - target) <= Math.max(0, epsilon));
+    return { blocked: false, changed, value: target };
+}
+
+/**
  * Compute the usable rectangle for a horizontal strip spanning several
  * monitors, relative to `boundingBox` origin.
  *

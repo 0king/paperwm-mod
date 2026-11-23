@@ -25,6 +25,7 @@ const testFiles = [
     './tiling-focus.test.js',
     './tiling-taskbar.test.js',
     './tiling-wrap.test.js',
+    './tiling-animation.test.js',
     './scratch.test.js',
     './navigator.test.js',
 ];

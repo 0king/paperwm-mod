@@ -460,6 +460,46 @@ The running shell caches a failed module as ERROR for the session, so a
 logout/login is still required after the file is fixed. See
 `bugs/bugs.md` §4.2.
 
+## 20) Stranded clone animations: icons over tiled windows, input lost to the desktop
+
+**Problem (reported 2026-11-22, GNOME Shell 50.1/Wayland, span mode, ding):**
+tiled window content remained visible but desktop icons/wallpaper painted on
+top of it, and clicks/keyboard focus went to the desktop instead of the tiled
+windows. Toggling the app grid recovered. See `bugs/bugs.md` §5.
+
+**Mechanism:** at rest PaperWM shows the real `WindowActor`s; during a layout
+animation `startAnimate()` hides them and shows clones in `cloneContainer`,
+which sits in `Main.layoutManager._backgroundGroup` — below every real window,
+including ding’s `DESKTOP` window. Only `moveDone()` restores the actors. A
+missed `moveDone()` therefore leaves clones painting the tiled content while
+the desktop above them owns pixels and input.
+
+**Fix:**
+- `Space.viewportMoveToX(x, animate=false)` called `this.moveDone.bind(this);`
+  (a discarded bound function — no call). It now calls `this.moveDone()`.
+  Inherited from upstream PaperWM; affects the `Spaces.monitorsChanged()`
+  viewport restore.
+- `Space.layout()`’s early return for `workArea.width === 0` (a
+  `monitors-changed` transient) now settles with `this.moveDone()` instead of
+  leaving the clones shown.
+- `Space.moveDone()` checks the overview/navigator/preview/grab guards first,
+  then uses the new pure `Lib.settleCoordinate()`: a live x/y transition is
+  awaited (its `onComplete` owns the settle); with no transition, stranded
+  coordinates (including NaN) are snapped to `targetX` / 0 and settling
+  continues. Snaps log a `console.warn`.
+- Bounded self-healing: `startAnimate()` arms `_scheduleSettleCheck()` for
+  visible spaces (`animation_time` + 250 ms, max 20 retries). It is cancelled
+  by `moveDone()` and `destroy()`, so completed animations pay nothing and a
+  lost callback cannot strand the clones indefinitely.
+- No schema/setting change; no new preference.
+
+**Tests:** `tests/lib.test.js` — `Lib.settleCoordinate` (stranded snap, live
+transition, epsilon, NaN). `tests/tiling-animation.test.js` (shell session) —
+`viewportMoveToX(animate=false)` settles, animated path settles from
+`onComplete`, `moveDone()` snaps stranded x/y but waits for live transitions,
+`layout()` zero-work-area abort settles. `make test` passes (148/148 plain-gjs
+tests; the new suite runs in a GNOME Shell session).
+
 ## Kill-switches & rollback
 
 - Span mode: `tiling.js:52` `SPAN_ALL_MONITORS = true → false` restores upstream per-monitor Spaces without reverting other fixes (overview/patches guards are span-conditional).

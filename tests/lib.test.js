@@ -245,6 +245,40 @@ describe('Lib.computeSpanWorkArea', () => {
     });
 });
 
+describe('Lib.settleCoordinate', () => {
+    it('snaps a stranded coordinate when no transition is running', () => {
+        eq(Lib.settleCoordinate(320, 0, false),
+            { blocked: false, changed: true, value: 0 });
+    });
+
+    it('waits for a live transition instead of settling early', () => {
+        eq(Lib.settleCoordinate(320, 0, true),
+            { blocked: true, changed: false, value: 320 });
+    });
+
+    it('reports an already settled coordinate as unchanged', () => {
+        eq(Lib.settleCoordinate(0, 0, false),
+            { blocked: false, changed: false, value: 0 });
+    });
+
+    it('tolerates sub-pixel error but still normalises to the target', () => {
+        eq(Lib.settleCoordinate(0.4, 0, false),
+            { blocked: false, changed: false, value: 0 });
+    });
+
+    it('treats NaN as stranded so the actor cannot stay off-target forever', () => {
+        eq(Lib.settleCoordinate(NaN, 0, false),
+            { blocked: false, changed: true, value: 0 });
+    });
+
+    it('honours a custom epsilon', () => {
+        eq(Lib.settleCoordinate(2, 0, false, 0),
+            { blocked: false, changed: true, value: 0 });
+        eq(Lib.settleCoordinate(2, 0, false, 3),
+            { blocked: false, changed: false, value: 0 });
+    });
+});
+
 describe('Lib.zip', () => {
     it('zips two arrays pairwise', () => {
         eq(Lib.zip([1, 2], ['a', 'b']), [[1, 'a'], [2, 'b']]);

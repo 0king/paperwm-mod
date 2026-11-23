@@ -510,6 +510,11 @@ export class Space extends Array {
         this._floating = [];
         this._populated = false;
 
+        // Watchdog for a lost animation-completion callback. See
+        // _scheduleSettleCheck(); cleared by moveDone() and destroy().
+        this._settleCheckId = null;
+        this._settleCheckRetries = 0;
+
         // default focusMode (overridden by saved user pref / default setting in Space.init).
         // Init from default setting so focus auto-centers from startup without
         // needing the focus-mode shortcut first.
@@ -990,6 +995,13 @@ export class Space extends Array {
         // Happens on monitors-changed
         if (workArea.width === 0) {
             this._inLayout = false;
+            // startAnimate() above already hid the real WindowActors and
+            // showed the clones. Aborting without settling would leave those
+            // clones visible in the background group, below every real window
+            // (and below the desktop/icons), so the desktop would keep both
+            // the pixels and the input until something else called moveDone().
+            // See bugs/bugs.md §5.
+            this.moveDone();
             return;
         }
 
@@ -1928,19 +1940,57 @@ export class Space extends Array {
                 });
         }
         else {
-            this.moveDone.bind(this);
+            // `bind()` only creates a function; it does not call it. The old
+            // code was therefore a no-op: startAnimate() had already hidden
+            // the real WindowActors and shown the clones, but moveDone() never
+            // ran. Clones live in Main.layoutManager._backgroundGroup, below
+            // every real window (including a desktop-icons DESKTOP window), so
+            // they stayed behind the desktop and it kept input. See
+            // bugs/bugs.md §5.
+            this.moveDone();
         }
     }
 
     moveDone(focusedWindowCallback = _focusedWindow => { }) {
-        if (this.cloneContainer.x !== this.targetX ||
-            this.actor.y !== 0 ||
-            Navigator.navigating || inPreview ||
+        // These owners call moveDone() themselves when they finish, so settling
+        // now would be premature (and could snap a viewport mid-drag/glide).
+        if (Navigator.navigating || inPreview ||
             Main.overview.visible ||
             // Block when we're carrying a window in dnd
             (inGrab && inGrab.window)
         ) {
             return;
+        }
+
+        // An interrupted animation (or a transition removed without firing
+        // onComplete) can leave these values off-target forever. startAnimate()
+        // has hidden the real WindowActors and shown the clones, so bailing
+        // here would leave the clones visible below the desktop/icons with no
+        // way to restore input. If the coordinate is not transitioning right
+        // now, snap it to the target and continue instead of returning. See
+        // bugs/bugs.md §5.
+        const xState = Lib.settleCoordinate(
+            this.cloneContainer.x,
+            this.targetX,
+            !!this.cloneContainer.get_transition('x'));
+        if (xState.blocked) {
+            return;
+        }
+        if (xState.changed) {
+            console.warn(`PaperWM: snap stranded viewport x ${this.cloneContainer.x} -> ${this.targetX} (space ${this.index})`);
+            this.cloneContainer.x = xState.value;
+        }
+
+        const yState = Lib.settleCoordinate(
+            this.actor.y,
+            0,
+            !!this.actor.get_transition('y'));
+        if (yState.blocked) {
+            return;
+        }
+        if (yState.changed) {
+            console.warn(`PaperWM: snap stranded space y ${this.actor.y} -> 0 (space ${this.index})`);
+            this.actor.y = yState.value;
         }
 
         this.visible = [];
@@ -1995,6 +2045,12 @@ export class Space extends Array {
         }
 
         this._isAnimating = false;
+        // A successful settle makes the pending watchdog check redundant.
+        if (this._settleCheckId) {
+            GLib.source_remove(this._settleCheckId);
+            this._settleCheckId = null;
+        }
+        this._settleCheckRetries = 0;
 
         if (this.selectedWindow && this.selectedWindow === display.focus_window) {
             let index = this.indexOf(this.selectedWindow);
@@ -2077,6 +2133,77 @@ export class Space extends Array {
         });
 
         this._isAnimating = true;
+        this._scheduleSettleCheck();
+    }
+
+    /**
+     * Arm a bounded self-healing check for the clone animation state.
+     *
+     * startAnimate() hides every real WindowActor and shows its clone in
+     * `cloneContainer`, which lives in `Main.layoutManager._backgroundGroup` —
+     * below every real window, including a desktop-icons DESKTOP window. The
+     * state is only undone by moveDone(). A transition removed without firing
+     * its onComplete (Easer.removeEase), a lost completion callback, or any of
+     * moveDone()'s guards can therefore strand the clones below the desktop:
+     * the tiled content still shows (clones), but the desktop keeps the input
+     * and paints its icons on top. Overview/hidden, grabs and the navigator
+     * each have their own moveDone() call sites; this is a last-resort retry
+     * for the paths that do not.
+     *
+     * Only shown spaces are checked (hidden ones cannot exhibit the symptom),
+     * and retries are bounded so a long preview/grab never leaves a timer
+     * running.
+     */
+    _scheduleSettleCheck() {
+        if (!this._visible)
+            return;
+        if (this._settleCheckId) {
+            GLib.source_remove(this._settleCheckId);
+            this._settleCheckId = null;
+        }
+        this._settleCheckRetries = 0;
+        this._queueSettleCheck();
+    }
+
+    /** @private */
+    _queueSettleCheck() {
+        const MAX_RETRIES = 20;
+        const animationMs = Math.round((Settings.prefs?.animation_time ?? 0.25) * 1000);
+        const delay = Math.max(100, animationMs + 250);
+        this._settleCheckId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, delay, () => {
+            this._settleCheckId = null;
+            if (!this._isAnimating || !this._visible)
+                return GLib.SOURCE_REMOVE;
+
+            const busy =
+                Easer.isEasing(this.cloneContainer) ||
+                !!this.cloneContainer.get_transition('opacity') ||
+                Easer.isEasing(this.actor) ||
+                this.drifting ||
+                Navigator.navigating || inPreview ||
+                Main.overview.visible ||
+                (inGrab && inGrab.window);
+            if (busy && this._settleCheckRetries < MAX_RETRIES) {
+                this._settleCheckRetries++;
+                this._queueSettleCheck();
+                return GLib.SOURCE_REMOVE;
+            }
+
+            try {
+                this.moveDone();
+            } catch (e) {
+                // A dying window can throw from a frame move; never let the
+                // watchdog itself take down the extension. moveDone() leaves
+                // _isAnimating true when it throws, so retry within the same
+                // bound instead of giving up on the first bad window.
+                console.error(`PaperWM: settle check failed (space ${this.index})`, e);
+                if (this._settleCheckRetries < MAX_RETRIES) {
+                    this._settleCheckRetries++;
+                    this._queueSettleCheck();
+                }
+            }
+            return GLib.SOURCE_REMOVE;
+        });
     }
 
     fixOverlays(metaWindow) {
@@ -2763,6 +2890,10 @@ border-radius: ${borderWidth}px;
     }
 
     destroy() {
+        if (this._settleCheckId) {
+            GLib.source_remove(this._settleCheckId);
+            this._settleCheckId = null;
+        }
         this.getWindows().forEach(w => {
             removePaperWMFlags(w);
         });
